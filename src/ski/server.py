@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import asyncssh
 
-TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[None]]
+TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[str | None]]
 
 
 class _TracerSession(asyncssh.SSHServerSession):
@@ -36,12 +36,24 @@ class _TracerSession(asyncssh.SSHServerSession):
             self._channel.exit(1)
             return
 
+        result: str | None = None
         if self._request_handler is not None:
-            await self._request_handler(
-                cast(asyncssh.SSHServerConnection, self._channel.get_connection())
-            )
+            try:
+                result = await self._request_handler(
+                    cast(
+                        asyncssh.SSHServerConnection,
+                        self._channel.get_connection(),
+                    )
+                )
+            except Exception:  # pragma: no cover - exercised by integration
+                self._channel.write_stderr("Tracer request failed.\n")
+                self._channel.exit(1)
+                return
 
-        self._channel.write("Tracer request accepted.\n")
+        if result is None:
+            self._channel.write("Tracer request accepted.\n")
+        else:
+            self._channel.write(f"Key loaded: {result}\n")
         self._channel.exit(0)
 
 
