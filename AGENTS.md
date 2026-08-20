@@ -17,6 +17,10 @@ and audit requirements.
 - `tests/`: behavioural tests for public interfaces.
 - `.agents/`: local copies of requested workflow skill guides.
 
+## Architecture
+
+Read `developer/architecture.md` for an overview of the system architecture, planned functionality, and design decisions.
+
 ## Development workflow
 
 Use Python through `uv`; do not invoke a system Python directly for project
