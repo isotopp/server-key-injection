@@ -10,6 +10,26 @@ Use this to create a commit message when asked to commit a change.
 
 A commit message consists of a title, a newline and an itemized list of changes.
 
+## Writing multiline messages
+
+The commit body must contain **real newline characters**. Never put the literal
+characters `\\n` in a `git commit -m` argument: Git stores them verbatim rather
+than turning them into line breaks.
+
+When using `git commit -m`, pass one multiline argument with actual line breaks,
+for example:
+
+```sh
+git commit -m "Title
+
+- first change (path:line)
+- second change (path:line)"
+```
+
+After every commit, verify the stored message with `git show -s --format=%B
+HEAD`. If it displays `\\n`, amend the local commit with a real multiline
+message before pushing it.
+
 The title is a single line, at most 78 characters long.
 If the commit implements a ticket in an epic, the format is "epic slug: ticketnumber - ticket title".
 For example "authentication-improvements: 1 - basic config".
