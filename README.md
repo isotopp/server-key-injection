@@ -19,6 +19,17 @@ Run the command from the managed environment:
 uv run ski --help
 ```
 
+## Configuration files
+
+Before it starts, `ski` loads the first existing configuration file in this
+order and stops searching:
+
+1. `./.env`
+2. `$HOME/.ski.env`
+3. `/etc/ski/env`
+
+Values already exported in the shell take precedence over values in that file.
+
 ## Intended operation
 
 Once the server and client protocol are implemented, an operator will run a

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+from ski.environment import load_environment
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the public command-line parser."""
@@ -21,4 +23,5 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """Run the command-line entry point."""
+    load_environment()
     build_parser().parse_args()
