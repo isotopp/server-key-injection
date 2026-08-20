@@ -56,3 +56,26 @@ make it pass with the smallest public implementation, then continue. Follow
 - Do not add network listeners, authentication backends, secrets management, or
   external integrations without a documented configuration and threat model.
 - Do not bypass the required formatter, linter, type checker, or test suite.
+
+## Specialization workflow
+
+We never generate code ad hoc unless the user specifically requests it. A
+direct request is a scoped bypass for debugging, an ad-hoc fix, or an
+experiment; Git provides the recovery path for that work.
+
+Otherwise, follow this directory-based workflow for the epic currently being
+worked on. Do not modify artifacts belonging to another independent epic or
+user story.
+
+1. **User-story step.** Create a directory named
+   `developer/<YYYY-MM-DD>-<epic-slug>/`. Put the epic's structured user stories
+   in `user-stories.md` and any relevant reviews in that directory, for example
+   `security-review.md` or `refactoring-review.md`.
+2. **Ticket step.** Commit the current epic's relevant user-story or review
+   file before this step. Develop it into actionable tickets in `tickets.md` in
+   the same directory, ordered for implementation. Use the TDD skill while
+   developing tickets.
+3. **Code-generation step.** Commit that epic's `tickets.md` before beginning
+   this step. Generate code from the tickets using the TDD skill. When a ticket
+   is complete, commit it using the git-commit skill; only then proceed to the
+   next ticket.
