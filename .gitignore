@@ -1,0 +1,35 @@
+# Python build and tool output
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ty/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local configuration
+.venv/
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+
+# SSH material: never commit private keys, certificates, or agent sockets.
+*.pem
+*.key
+*.pub
+*.crt
+*.cert
+known_hosts
+ssh-agent.sock

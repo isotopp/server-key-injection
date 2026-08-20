@@ -1,0 +1,41 @@
+[project]
+name = "ski"
+version = "0.1.0"
+description = "SSH certificate issuer and ssh-agent integration service"
+readme = "README.md"
+authors = [
+    { name = "Kristian Koehntopp", email = "kris-git@koehntopp.de" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "asyncssh>=2.21.1",
+]
+
+[project.scripts]
+ski = "ski.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.27,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+    "ruff>=0.11.0",
+    "ty>=0.0.1a14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra"]
+
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ty.environment]
+python-version = "3.12"
+root = ["./src", "./tests"]

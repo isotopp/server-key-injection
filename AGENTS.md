@@ -1,0 +1,54 @@
+# Development guide
+
+## Project purpose
+
+`ski` is a Python package for a service which issues short-lived SSH
+certificates and a client which loads the certificate identity into the user's
+existing `ssh-agent`. AsyncSSH is the planned SSH implementation library.
+
+The currently implemented surface is intentionally only the package and command
+line foundation. Before introducing the issuing protocol, agree on the trust
+model, authentication method, principals, validity limits, certificate options,
+and audit requirements.
+
+## Layout
+
+- `src/ski/`: importable application package.
+- `tests/`: behavioural tests for public interfaces.
+- `.agents/`: local copies of requested workflow skill guides.
+
+## Development workflow
+
+Use Python through `uv`; do not invoke a system Python directly for project
+tasks. Keep the package layout under `src/` and add tests under `tests/`.
+
+Run these commands before handing off a change:
+
+```console
+uv run ruff format
+uv run ruff check --fix
+uv run ty check
+uv run pytest
+```
+
+Follow `.agents/tdd.md` for test-driven changes: add one behavioural test,
+make it pass with the smallest public implementation, then continue. Follow
+`.agents/git-commit.md` when creating a commit.
+
+## Guardrails
+
+- Never implement a protocol that transmits, logs, persists, or commits a user's
+  SSH private key.
+- Treat CA private keys, issued certificates, agent sockets, and authorization
+  policy as sensitive material. Keep them out of Git, test fixtures, logs, and
+  error messages.
+- Require explicit design review before changing identity verification,
+  certificate principals, validity periods, critical options, extensions, or
+  host/user certificate policy.
+- Prefer short certificate lifetimes and least-privilege principals. Do not
+  silently broaden access after issuance.
+- Validate all untrusted protocol inputs and reject malformed or unsupported key
+  types and certificate requests.
+- Do not add network listeners, authentication backends, secrets management, or
+  external integrations without a documented configuration and threat model.
+- Do not bypass the required formatter, linter, type checker, or test suite.
