@@ -444,6 +444,32 @@ def test_service_runtime_close_releases_state_and_is_idempotent(tmp_path: Path) 
     asyncio.run(exercise())
 
 
+def test_service_runtime_concurrent_close_is_bounded_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    """Concurrent close callers share one listener/state cleanup operation."""
+
+    async def exercise() -> None:
+        sink = MemoryEventSink()
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment=runtime_environment(
+                tmp_path,
+                tmp_path / "state.sqlite3",
+            ),
+            event_sink=sink,
+        )
+        await runtime.start()
+        await asyncio.gather(runtime.close(), runtime.close())
+
+        assert [event.name for event in sink.events].count("service_stopped") == 1
+        reopened = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+        reopened.close()
+
+    asyncio.run(exercise())
+
+
 def test_listener_start_failure_releases_state_ownership(tmp_path: Path) -> None:
     """A listener failure unwinds the state acquired before it."""
 
