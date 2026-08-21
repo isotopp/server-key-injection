@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncssh
+import pytest
 
 from ski.ca import load_validated_active_ca
 from ski.credentials import (
@@ -14,7 +15,7 @@ from ski.credentials import (
     OrdinaryIssuanceService,
 )
 from ski.identities import IdentitySnapshot
-from ski.state import StateDatabase
+from ski.state import StateDatabase, StateError
 from support import runtime_environment
 
 
@@ -189,5 +190,51 @@ def test_ordinary_issuance_retries_serial_collision_without_replacing_history(
         )
         assert credential.serial == 11
         assert [record.serial for record in database.list_certificates()] == [10, 11]
+    finally:
+        database.close()
+
+
+def test_ordinary_issuance_does_not_retry_an_untyped_serial_message(
+    tmp_path: Path,
+) -> None:
+    """Only DuplicateCertificateSerialError is retryable, not matching text."""
+    environment = runtime_environment(tmp_path, tmp_path / "state.sqlite3")
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        active_ca = load_validated_active_ca(
+            database,
+            private_path=Path(environment["SKI_CA_PRIVATE_KEY"]),
+            public_path=Path(environment["SKI_CA_PUBLIC_KEY"]),
+        )
+
+        class UnexpectedPersistence:
+            commit_attempts = 0
+            failure_events = 0
+
+            def record_certificate_with_event(self, **kwargs: object) -> object:
+                del kwargs
+                self.commit_attempts += 1
+                raise StateError("certificate serial is already recorded")
+
+            def record_event(self, **kwargs: object) -> None:
+                del kwargs
+                self.failure_events += 1
+
+        persistence = UnexpectedPersistence()
+        service = OrdinaryIssuanceService(
+            cast(StateDatabase, persistence),
+            active_ca,
+            extensions=("pty",),
+            serial_allocator=lambda: 7,
+        )
+
+        with pytest.raises(StateError, match="certificate serial is already recorded"):
+            service.issue(
+                IdentitySnapshot(username="alice", groups=()),
+                request_id="request-untyped-error",
+            )
+
+        assert persistence.commit_attempts == 1
+        assert persistence.failure_events == 1
     finally:
         database.close()
