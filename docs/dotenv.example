@@ -13,6 +13,10 @@
 # foundational SQLite schema here; it does not create persistent CA material.
 SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
 
+# The Epic 3 issuer SSH host key is not an environment setting. ski stores its
+# persistent Ed25519 host key in SKI_CA_DATABASE; distributing its public key,
+# backups, and rotation remain external operational responsibilities.
+
 # Persistent CA and certificate settings for later epics. These are documented
 # here so deployment configuration can be prepared, but the current test tracer
 # does not read or require them.

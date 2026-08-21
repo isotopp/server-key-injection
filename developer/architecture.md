@@ -177,6 +177,15 @@ process memory, and signs certificates locally. Its CA **public** key is
 distributed to production hosts. This matches the operational model described
 by this architecture; there is no separate signing API, HSM, or KMS component.
 
+The issuer's SSH server identity is separate from the user CA. It uses one
+persistent Ed25519 host key stored in the `ssh_host_keys` record of
+`SKI_CA_DATABASE`, generated on first identity setup and loaded on every later
+service start. The database file therefore protects this host private key as
+well as the demo identity data. Distribution of the host public key or
+`known_hosts` entry, database backup, and host-key rotation are external
+operational responsibilities; `ski` has no host-key configuration setting,
+automatic rotation, or host-key administration command.
+
 The `.env` configuration records file locations, not private-key material. A
 production `/etc/ski/env` may contain:
 
@@ -216,9 +225,17 @@ The demo stores users, password verifiers, TOTP secrets, and group memberships
 in the same SQLite database configured by `SKI_CA_DATABASE`. The relevant
 tables are `users`, `groups`, and `user_groups`. A user has a canonical user
 name, a password hash, a TOTP secret, and an enabled/disabled status. Passwords
-are stored as a deliberately slow password hash, never as cleartext. TOTP
-secrets are sensitive database data: they are not logged or returned by normal
-user commands.
+use `argon2-cffi`'s high-level Argon2id `PasswordHasher`, never cleartext. Its
+parameters are benchmarked on issuer hardware and made application defaults;
+on successful authentication the verifier is rehashed when it no longer meets
+those defaults. TOTP uses `PyOTP`, with a secret of at least 160 bits generated
+by Python's `secrets` module. Secrets and password verifiers are sensitive
+database data: they are not logged or returned by normal user commands.
+
+Canonical usernames match `^[a-z][a-z0-9_-]{0,31}$`; canonical group names
+match `^[a-z][a-z0-9-]{0,62}$`. Inputs outside these already-lowercase ASCII
+forms are rejected rather than case-folded. Groups are stored without a prefix;
+a later certificate group principal is derived as `group:<group-name>`.
 
 All identity access is isolated behind an abstract `IdentityStore` interface.
 Its operations cover password authentication, TOTP verification, current group
@@ -236,6 +253,12 @@ The administrative commands are local operator commands, separate from the
 normal certificate-issuance login. They prompt for passwords and TOTP secrets
 instead of accepting them as command-line arguments; see
 [Demo identity commands](#demo-identity-commands) for their full surface.
+Enrollment displays an `otpauth://` URI and its Base32 secret once, without
+terminal QR rendering. TOTP verification uses 30-second steps and accepts the
+previous, current, and next step (`valid_window=1`). Each SSH connection gets
+at most one password/TOTP exchange. Network connection rate limiting is
+external to `ski`; the demo does not implement source-address throttling or
+persistent per-account lockout.
 
 ### User workstation and agent
 
@@ -305,6 +328,10 @@ The database contains at least these tables:
 
 | Table                | Purpose                                                                                                                                                                                         |
 |----------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ssh_host_keys`      | The issuer SSH server's persistent Ed25519 private key, public key, and fingerprint. It is distinct from a user CA and has no application-managed rotation lifecycle.                          |
+| `users`              | Demo canonical identity, Argon2id password verifier, TOTP secret, and enabled/disabled status.                                                                                                 |
+| `groups`             | Demo canonical group names.                                                                                                                                                                     |
+| `user_groups`        | Demo user/group memberships used for the issuer-side snapshot.                                                                                                                                |
 | `ca_keys`            | CA public-key fingerprint, public key, configured private-key path, activation period, and key status for rotation.                                                                             |
 | `certificates`       | One row per issued certificate: serial, CA fingerprint, user identity, public-key fingerprint, principals, validity interval, request ID, and issuance outcome. The serial is unique per CA.    |
 | `revocation_events`  | The full append-only revocation history: CA fingerprint, certificate serial, time, operator identity, and reason. These records are retained for audit even after the certificate has expired.  |
