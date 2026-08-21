@@ -403,6 +403,25 @@ def _require_group_administration(store: object) -> GroupAdministration:
     return store
 
 
+def _complete_mutation(
+    notifier: ServiceReloadNotifier,
+    *,
+    output: TextIO,
+    success_lines: Sequence[str],
+    committed_message: str | None = None,
+) -> None:
+    """Render durable success and handle one post-commit notification result."""
+    notification = notifier.notify_after_mutation()
+    for line in success_lines:
+        print(line, file=output)
+    if not notification.succeeded:
+        if committed_message is not None:
+            print(committed_message, file=output)
+        raise SystemExit(
+            "ski: service notification failed; mutation committed; retry notification",
+        )
+
+
 def _run_user_add(
     username: str,
     *,
@@ -416,23 +435,22 @@ def _run_user_add(
         password = secret_reader("Password: ")
         totp_secret = _new_totp_secret()
         user = administration.create_user(username, password, totp_secret)
-        notification = notifier.notify_after_mutation()
         uri = pyotp.TOTP(user.totp_secret).provisioning_uri(
             name=user.username,
             issuer_name="ski",
         )
-        print(f"User created: {user.username}", file=output)
-        print(f"TOTP secret: {user.totp_secret}", file=output)
-        print(f"TOTP URI: {uri}", file=output)
-        if not notification.succeeded:
-            print(
-                "User committed, but service notification failed; retry notification.",
-                file=output,
-            )
-            raise SystemExit(
-                "ski: service notification failed; mutation committed; "
-                "retry notification",
-            )
+        _complete_mutation(
+            notifier,
+            output=output,
+            success_lines=(
+                f"User created: {user.username}",
+                f"TOTP secret: {user.totp_secret}",
+                f"TOTP URI: {uri}",
+            ),
+            committed_message=(
+                "User committed, but service notification failed; retry notification."
+            ),
+        )
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: user enrollment failed: {exc}") from exc
     finally:
@@ -474,18 +492,15 @@ def _run_user_status(
     try:
         administration = _require_user_administration(store)
         user = administration.set_user_enabled(username, enabled)
-        notification = notifier.notify_after_mutation()
         status = "enabled" if user.enabled else "disabled"
-        print(f"User {user.username} is {status}.", file=output)
-        if not notification.succeeded:
-            print(
-                "User committed, but service notification failed; retry notification.",
-                file=output,
-            )
-            raise SystemExit(
-                "ski: service notification failed; mutation committed; "
-                "retry notification",
-            )
+        _complete_mutation(
+            notifier,
+            output=output,
+            success_lines=(f"User {user.username} is {status}.",),
+            committed_message=(
+                "User committed, but service notification failed; retry notification."
+            ),
+        )
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: user status change failed: {exc}") from exc
     finally:
@@ -505,18 +520,15 @@ def _run_user_password_set(
         administration = _require_user_administration(store)
         password = secret_reader("New password: ")
         user = administration.replace_password(username, password)
-        notification = notifier.notify_after_mutation()
-        print(f"Password updated: {user.username}", file=output)
-        if not notification.succeeded:
-            print(
+        _complete_mutation(
+            notifier,
+            output=output,
+            success_lines=(f"Password updated: {user.username}",),
+            committed_message=(
                 "Password committed, but service notification failed; "
-                "retry notification.",
-                file=output,
-            )
-            raise SystemExit(
-                "ski: service notification failed; mutation committed; "
-                "retry notification",
-            )
+                "retry notification."
+            ),
+        )
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: password replacement failed: {exc}") from exc
     finally:
@@ -534,23 +546,22 @@ def _run_user_totp_regenerate(
     try:
         administration = _require_user_administration(store)
         user = administration.replace_totp_secret(username, _new_totp_secret())
-        notification = notifier.notify_after_mutation()
         uri = pyotp.TOTP(user.totp_secret).provisioning_uri(
             name=user.username,
             issuer_name="ski",
         )
-        print(f"TOTP regenerated: {user.username}", file=output)
-        print(f"TOTP secret: {user.totp_secret}", file=output)
-        print(f"TOTP URI: {uri}", file=output)
-        if not notification.succeeded:
-            print(
-                "TOTP committed, but service notification failed; retry notification.",
-                file=output,
-            )
-            raise SystemExit(
-                "ski: service notification failed; mutation committed; "
-                "retry notification",
-            )
+        _complete_mutation(
+            notifier,
+            output=output,
+            success_lines=(
+                f"TOTP regenerated: {user.username}",
+                f"TOTP secret: {user.totp_secret}",
+                f"TOTP URI: {uri}",
+            ),
+            committed_message=(
+                "TOTP committed, but service notification failed; retry notification."
+            ),
+        )
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: TOTP replacement failed: {exc}") from exc
     finally:
@@ -568,13 +579,11 @@ def _run_group_add(
     try:
         administration = _require_group_administration(store)
         administration.create_group(name)
-        notification = notifier.notify_after_mutation()
-        print(f"Group created: {name}", file=output)
-        if not notification.succeeded:
-            raise SystemExit(
-                "ski: service notification failed; mutation committed; "
-                "retry notification",
-            )
+        _complete_mutation(
+            notifier,
+            output=output,
+            success_lines=(f"Group created: {name}",),
+        )
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: group creation failed: {exc}") from exc
     finally:
@@ -618,13 +627,11 @@ def _run_group_remove(
     try:
         administration = _require_group_administration(store)
         administration.remove_group(name)
-        notification = notifier.notify_after_mutation()
-        print(f"Group removed: {name}", file=output)
-        if not notification.succeeded:
-            raise SystemExit(
-                "ski: service notification failed; mutation committed; "
-                "retry notification",
-            )
+        _complete_mutation(
+            notifier,
+            output=output,
+            success_lines=(f"Group removed: {name}",),
+        )
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: group removal failed: {exc}") from exc
     finally:
@@ -649,13 +656,11 @@ def _run_group_membership(
         else:
             administration.remove_membership(group, username)
             action = "removed"
-        notification = notifier.notify_after_mutation()
-        print(f"Membership {action}: {group} {username}", file=output)
-        if not notification.succeeded:
-            raise SystemExit(
-                "ski: service notification failed; mutation committed; "
-                "retry notification",
-            )
+        _complete_mutation(
+            notifier,
+            output=output,
+            success_lines=(f"Membership {action}: {group} {username}",),
+        )
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: membership change failed: {exc}") from exc
     finally:
