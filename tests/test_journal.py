@@ -1,0 +1,86 @@
+"""Behavioural tests for the operational event boundary."""
+
+from __future__ import annotations
+
+from io import StringIO
+
+import pytest
+
+from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
+
+
+def test_memory_event_sink_records_a_structured_service_event() -> None:
+    """A caller can observe one complete operational event."""
+    sink = MemoryEventSink()
+    sink.emit(
+        Event(
+            name="service_ready",
+            message="ski is ready",
+            priority=6,
+            fields={"SKI_REQUEST_ID": "request-1"},
+        ),
+    )
+
+    assert sink.events[0].name == "service_ready"
+    assert sink.events[0].message == "ski is ready"
+    assert sink.events[0].priority == 6
+    assert sink.events[0].fields["SKI_REQUEST_ID"] == "request-1"
+
+
+def test_journal_sink_submits_native_queryable_fields() -> None:
+    """The production boundary passes fields instead of embedding JSON."""
+
+    class FakeJournal:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, str | int]]] = []
+
+        def send(self, message: str, **fields: str | int) -> None:
+            self.calls.append((message, fields))
+
+    journal = FakeJournal()
+    sink = JournalEventSink(journal=journal, identifier="ski")
+    sink.emit(
+        Event(
+            name="service_ready",
+            message="ski is ready",
+            priority=6,
+            fields={"SKI_REQUEST_ID": "request-1"},
+        ),
+    )
+
+    message, fields = journal.calls[0]
+    assert message == "ski is ready"
+    assert fields == {
+        "PRIORITY": 6,
+        "SYSLOG_IDENTIFIER": "ski",
+        "SKI_EVENT": "service_ready",
+        "SKI_REQUEST_ID": "request-1",
+    }
+
+
+def test_event_rejects_unapproved_application_fields() -> None:
+    """The event API cannot be used as a secret dumping channel."""
+    with pytest.raises(ValueError, match="unsupported journal field"):
+        Event(
+            name="service_ready",
+            message="ski is ready",
+            priority=6,
+            fields={"PASSWORD": "secret"},
+        )
+
+    with pytest.raises(ValueError, match="unsupported journal field"):
+        Event(
+            name="service_ready",
+            message="ski is ready",
+            priority=6,
+            fields={"SKI_PRIVATE_KEY": "secret"},
+        )
+
+
+def test_console_sink_is_available_without_systemd() -> None:
+    """Non-systemd development has an explicit, redacted fallback sink."""
+    output = StringIO()
+    sink = ConsoleEventSink(stream=output)
+    sink.emit(Event(name="service_ready", message="ski is ready", priority=6))
+
+    assert output.getvalue() == "service_ready: ski is ready\n"
