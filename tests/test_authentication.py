@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import asyncssh
 import pyotp
 import pytest
 
-from ski.identities import SqliteIdentityStore
+from ski.identities import IdentitySnapshot, IdentityStore, SqliteIdentityStore
 from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
@@ -55,6 +56,98 @@ def test_enabled_user_is_admitted_by_password_and_totp_challenge(
         assert client.prompts == ("Password:", "2FA:")
     finally:
         database.close()
+
+
+def test_authenticated_exchange_uses_only_read_identity_capabilities() -> None:
+    """The SSH runtime accepts a backend without demo administration methods."""
+
+    class ReadOnlyIdentityBackend:
+        def verify_password(self, username: str, password: str) -> bool:
+            return username == "alice" and password == "password"
+
+        def verify_totp(
+            self,
+            username: str,
+            code: str,
+            *,
+            now: int | None = None,
+        ) -> bool:
+            del now
+            return username == "alice" and code == "123456"
+
+        def get_group_snapshot(self, username: str) -> IdentitySnapshot:
+            assert username == "alice"
+            return IdentitySnapshot(username="alice", groups=("ops",))
+
+    async def exercise() -> None:
+        issuer = TracerIssuer(
+            bind="127.0.0.1",
+            port=0,
+            identity_store=cast(IdentityStore, ReadOnlyIdentityBackend()),
+        )
+        await issuer.start()
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1",
+                port=issuer.port,
+                username="alice",
+                known_hosts=None,
+                client_factory=lambda: _MfaClient("password", "123456"),
+                kbdint_auth=True,
+            ):
+                pass
+        finally:
+            await issuer.close()
+
+    asyncio.run(exercise())
+
+
+def test_read_only_identity_backend_failure_is_a_uniform_denial() -> None:
+    """A read backend failure never opens an authenticated SSH session."""
+
+    class BrokenReadOnlyIdentityBackend:
+        def verify_password(self, username: str, password: str) -> bool:
+            del username, password
+            raise RuntimeError("backend detail")
+
+        def verify_totp(
+            self,
+            username: str,
+            code: str,
+            *,
+            now: int | None = None,
+        ) -> bool:
+            del username, code, now
+            return True
+
+        def get_group_snapshot(self, username: str) -> IdentitySnapshot:
+            return IdentitySnapshot(username=username, groups=())
+
+    async def exercise() -> None:
+        issuer = TracerIssuer(
+            bind="127.0.0.1",
+            port=0,
+            identity_store=cast(
+                IdentityStore,
+                BrokenReadOnlyIdentityBackend(),
+            ),
+        )
+        await issuer.start()
+        try:
+            with pytest.raises((asyncssh.PermissionDenied, asyncssh.ConnectionLost)):
+                async with asyncssh.connect(
+                    "127.0.0.1",
+                    port=issuer.port,
+                    username="alice",
+                    known_hosts=None,
+                    client_factory=lambda: _MfaClient("password", "123456"),
+                    kbdint_auth=True,
+                ):
+                    pass
+        finally:
+            await issuer.close()
+
+    asyncio.run(exercise())
 
 
 def test_service_runtime_wires_the_sqlite_identity_store_into_the_issuer(
