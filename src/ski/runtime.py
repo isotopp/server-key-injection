@@ -9,6 +9,7 @@ import signal
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import asyncssh
@@ -30,6 +31,17 @@ EventSink = MemoryEventSink | ConsoleEventSink | JournalEventSink
 StateOpener = Callable[..., StateDatabase]
 IssuerFactory = Callable[..., TracerIssuer]
 DEFAULT_SHUTDOWN_GRACE_PERIOD = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeResources:
+    """One immutable, fully acquired set of resources visible to requests."""
+
+    configuration: RuntimeConfiguration
+    state: StateDatabase
+    active_ca: ValidatedActiveCA
+    issuer: TracerIssuer
+    ordinary_injector: OrdinaryAgentInjector
 
 
 def default_event_sink() -> EventSink:
@@ -60,11 +72,8 @@ class ServiceRuntime:
         self._event_sink = default_event_sink() if event_sink is None else event_sink
         self._state_opener = state_opener
         self._issuer_factory = issuer_factory
-        self._configuration: RuntimeConfiguration | None = None
+        self._resources: RuntimeResources | None = None
         self._configuration_generation = 0
-        self._state: StateDatabase | None = None
-        self._active_ca: ValidatedActiveCA | None = None
-        self._issuer: TracerIssuer | None = None
         self._in_flight: set[asyncio.Task[Any]] = set()
         self._stopping = False
         self._close_started = False
@@ -73,35 +82,38 @@ class ServiceRuntime:
         self._reload_requested = asyncio.Event()
         self._reload_lock = asyncio.Lock()
         self._injector = TracerAgentInjector()
-        self._ordinary_injector: OrdinaryAgentInjector | None = None
 
     @property
     def configuration(self) -> RuntimeConfiguration:
         """Return the active immutable configuration snapshot."""
-        if self._configuration is None:
+        resources = self._resources
+        if resources is None:
             raise RuntimeError("service runtime is not started")
-        return self._configuration
+        return resources.configuration
 
     @property
     def state(self) -> StateDatabase:
         """Return the active local state handle."""
-        if self._state is None:
+        resources = self._resources
+        if resources is None:
             raise RuntimeError("service runtime is not started")
-        return self._state
+        return resources.state
 
     @property
     def issuer(self) -> TracerIssuer:
         """Return the active tracer issuer."""
-        if self._issuer is None:
+        resources = self._resources
+        if resources is None:
             raise RuntimeError("service runtime is not started")
-        return self._issuer
+        return resources.issuer
 
     @property
     def active_ca(self) -> ValidatedActiveCA:
         """Return the validated persistent CA used by this runtime."""
-        if self._active_ca is None:
+        resources = self._resources
+        if resources is None:
             raise RuntimeError("service runtime is not started")
-        return self._active_ca
+        return resources.active_ca
 
     @property
     def configuration_generation(self) -> int:
@@ -110,10 +122,12 @@ class ServiceRuntime:
 
     async def start(self) -> None:
         """Start all resources, or unwind every resource acquired so far."""
-        if self._issuer is not None or self._state is not None:
+        if self._resources is not None:
             raise RuntimeError("service runtime is already running")
 
         self._emit("service_starting", "ski startup requested")
+        state: StateDatabase | None = None
+        issuer: TracerIssuer | None = None
         try:
             configuration = load_runtime_configuration(
                 bind=self.bind,
@@ -122,7 +136,6 @@ class ServiceRuntime:
                 allow_ephemeral_port=self.port == 0,
             )
             state = self._state_opener(configuration.database, owner=True)
-            self._state = state
             host_key = asyncssh.import_private_key(state.host_key.private_key)
             if (
                 configuration.ca_private_key is None
@@ -134,8 +147,7 @@ class ServiceRuntime:
                 private_path=configuration.ca_private_key,
                 public_path=configuration.ca_public_key,
             )
-            self._active_ca = active_ca
-            self._ordinary_injector = OrdinaryAgentInjector(
+            ordinary_injector = OrdinaryAgentInjector(
                 OrdinaryIssuanceService(
                     state,
                     active_ca,
@@ -152,12 +164,17 @@ class ServiceRuntime:
                 identity_store=identity_store,
                 active_ca=active_ca,
             )
-            self._issuer = issuer
             await issuer.start()
-            self._configuration = configuration
+            self._resources = RuntimeResources(
+                configuration=configuration,
+                state=state,
+                active_ca=active_ca,
+                issuer=issuer,
+                ordinary_injector=ordinary_injector,
+            )
             self._configuration_generation = 1
         except Exception as exc:
-            await self._cleanup_resources()
+            await self._close_partial_resources(issuer, state)
             self._emit(
                 "service_start_failed",
                 "ski startup failed",
@@ -185,7 +202,8 @@ class ServiceRuntime:
 
     async def _reload_once(self) -> bool:
         """Validate and atomically adopt a reloadable configuration candidate."""
-        if self._configuration is None:
+        resources = self._resources
+        if resources is None:
             raise RuntimeError("service runtime is not started")
 
         self._emit("service_reload_started", "ski configuration reload requested")
@@ -196,12 +214,12 @@ class ServiceRuntime:
                 exported_environment=self._exported_environment,
                 allow_ephemeral_port=self.port == 0,
             )
-            if candidate.database != self._configuration.database:
+            if candidate.database != resources.configuration.database:
                 raise ConfigurationError("restart required for database path change")
             if (
-                candidate.ca_private_key != self._configuration.ca_private_key
-                or candidate.ca_public_key != self._configuration.ca_public_key
-                or candidate.ca_krl != self._configuration.ca_krl
+                candidate.ca_private_key != resources.configuration.ca_private_key
+                or candidate.ca_public_key != resources.configuration.ca_public_key
+                or candidate.ca_krl != resources.configuration.ca_krl
             ):
                 raise ConfigurationError("restart required for CA path change")
         except Exception as exc:
@@ -219,7 +237,13 @@ class ServiceRuntime:
             )
             return False
 
-        self._configuration = candidate
+        self._resources = RuntimeResources(
+            configuration=candidate,
+            state=resources.state,
+            active_ca=resources.active_ca,
+            issuer=resources.issuer,
+            ordinary_injector=resources.ordinary_injector,
+        )
         self._configuration_generation += 1
         self._emit(
             "service_reload_accepted",
@@ -234,27 +258,22 @@ class ServiceRuntime:
         grace_period: float = DEFAULT_SHUTDOWN_GRACE_PERIOD,
     ) -> None:
         """Close listeners, drain requests, and release ownership."""
-        if self._issuer is None and self._state is None:
-            return
         if self._close_started:
             await self._close_complete.wait()
+            return
+        resources = self._resources
+        if resources is None:
             return
 
         self._close_started = True
         self._stopping = True
+        self._resources = None
         self._emit("service_stopping", "ski shutdown requested")
         try:
-            issuer, self._issuer = self._issuer, None
-            if issuer is not None:
-                await issuer.close()
+            await resources.issuer.close()
             await self._drain_requests(grace_period)
         finally:
-            state, self._state = self._state, None
-            if state is not None:
-                state.close()
-            self._configuration = None
-            self._active_ca = None
-            self._ordinary_injector = None
+            resources.state.close()
             self._configuration_generation = 0
             self._emit("service_stopped", "ski shutdown complete")
             self._close_complete.set()
@@ -262,7 +281,7 @@ class ServiceRuntime:
     @asynccontextmanager
     async def request_scope(self) -> AsyncIterator[RuntimeConfiguration]:
         """Track one admitted request until it finishes or is cancelled."""
-        if self._stopping or self._issuer is None:
+        if self._stopping or self._resources is None:
             raise RuntimeError("service runtime is stopping or not started")
         task = asyncio.current_task()
         if task is None:
@@ -351,9 +370,10 @@ class ServiceRuntime:
         }
         try:
             async with self.request_scope():
-                if self._ordinary_injector is None:
+                resources = self._resources
+                if resources is None:
                     raise RuntimeError("ordinary injector is unavailable")
-                issuance = await self._ordinary_injector.handle(
+                issuance = await resources.ordinary_injector.handle(
                     connection,
                     identity,
                     request_id=request_id,
@@ -394,11 +414,12 @@ class ServiceRuntime:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _cleanup_resources(self) -> None:
-        issuer, self._issuer = self._issuer, None
-        state, self._state = self._state, None
-        self._active_ca = None
-        self._ordinary_injector = None
+    async def _close_partial_resources(
+        self,
+        issuer: TracerIssuer | None,
+        state: StateDatabase | None,
+    ) -> None:
+        """Close resources acquired before the immutable bundle became visible."""
         if issuer is not None:
             await issuer.close()
         if state is not None:
