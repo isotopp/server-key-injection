@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import re
+import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
+from ski.ca import CAFileError, CAFileWriter
 from ski.configuration import ConfigurationError, load_runtime_configuration
 from ski.policy import PolicyValidationError, validate_username
 from ski.state import CAKeyRecord, EventRecord, StateDatabase
 
 
-@contextmanager
-def ca_read_database() -> Iterator[StateDatabase]:
-    """Open and always close the configured CA database for one read."""
+def _ca_configuration():
+    """Load the complete CA configuration required by CA workflows."""
     configuration = load_runtime_configuration(bind="127.0.0.1", port=22)
     if (
         configuration.ca_private_key is None
@@ -22,11 +24,58 @@ def ca_read_database() -> Iterator[StateDatabase]:
         or configuration.ca_krl is None
     ):
         raise ConfigurationError("ordinary CA configuration is incomplete")
+    return configuration
+
+
+@contextmanager
+def ca_read_database() -> Iterator[StateDatabase]:
+    """Open and always close the configured CA database for one read."""
+    configuration = _ca_configuration()
     database = StateDatabase.open(configuration.database)
     try:
         yield database
     finally:
         database.close()
+
+
+def initialize_ca() -> CAKeyRecord:
+    """Install CA files and register them with compensating cleanup."""
+    configuration = _ca_configuration()
+    assert configuration.ca_private_key is not None
+    assert configuration.ca_public_key is not None
+    assert configuration.ca_krl is not None
+    paths: tuple[Path, ...] = (
+        configuration.ca_private_key,
+        configuration.ca_public_key,
+        configuration.ca_krl,
+    )
+    database = StateDatabase.open(configuration.database)
+    try:
+        if database.get_active_ca() is not None:
+            raise CAFileError("an active CA is already registered")
+        material = CAFileWriter().install(
+            private_path=configuration.ca_private_key,
+            public_path=configuration.ca_public_key,
+            krl_path=configuration.ca_krl,
+        )
+        try:
+            return database.initialize_active_ca(
+                public_key=material.public_bytes,
+                fingerprint=material.fingerprint,
+                private_key_path=configuration.ca_private_key,
+                request_id=f"ca-init-{secrets.token_hex(16)}",
+            )
+        except Exception:
+            _remove_initialized_files(paths)
+            raise
+    finally:
+        database.close()
+
+
+def _remove_initialized_files(paths: tuple[Path, ...]) -> None:
+    """Remove only fresh CA targets after a failed database commit."""
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 def show_ca_records(*, show_all: bool) -> tuple[CAKeyRecord, ...]:

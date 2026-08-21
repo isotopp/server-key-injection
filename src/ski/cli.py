@@ -9,13 +9,13 @@ import getpass
 import secrets
 import sys
 from collections.abc import Callable, Sequence
-from pathlib import Path
 from typing import TextIO
 
 import pyotp
 
-from ski.ca import CAFileError, CAFileWriter
+from ski.ca import CAFileError
 from ski.ca_commands import (
+    initialize_ca,
     list_ca_events,
     read_ca_public_key,
     show_ca_records,
@@ -159,60 +159,14 @@ def _new_totp_secret() -> str:
     return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
 
 
-def _ca_configuration():
-    """Load the complete CA configuration for a public CA command."""
-    configuration = load_runtime_configuration(bind="127.0.0.1", port=22)
-    if (
-        configuration.ca_private_key is None
-        or configuration.ca_public_key is None
-        or configuration.ca_krl is None
-    ):
-        raise ConfigurationError("ordinary CA configuration is incomplete")
-    return configuration
-
-
-def _remove_initialized_files(paths: tuple[Path, ...]) -> None:
-    """Remove only fresh CA targets after a failed database commit."""
-    for path in paths:
-        path.unlink(missing_ok=True)
-
-
 def _run_ca_init(
     *,
     notifier: ServiceReloadNotifier,
     output: TextIO,
 ) -> None:
     """Initialize one configured Ed25519 CA and its empty KRL."""
-    database: StateDatabase | None = None
-    paths: tuple[Path, ...] | None = None
     try:
-        configuration = _ca_configuration()
-        assert configuration.ca_private_key is not None
-        assert configuration.ca_public_key is not None
-        assert configuration.ca_krl is not None
-        paths = (
-            configuration.ca_private_key,
-            configuration.ca_public_key,
-            configuration.ca_krl,
-        )
-        database = StateDatabase.open(configuration.database)
-        if database.get_active_ca() is not None:
-            raise CAFileError("an active CA is already registered")
-        material = CAFileWriter().install(
-            private_path=configuration.ca_private_key,
-            public_path=configuration.ca_public_key,
-            krl_path=configuration.ca_krl,
-        )
-        try:
-            ca = database.initialize_active_ca(
-                public_key=material.public_bytes,
-                fingerprint=material.fingerprint,
-                private_key_path=configuration.ca_private_key,
-                request_id=f"ca-init-{secrets.token_hex(16)}",
-            )
-        except Exception:
-            _remove_initialized_files(paths)
-            raise
+        ca = initialize_ca()
         notification = notifier.notify_after_mutation()
         print("CA initialized.", file=output)
         print(f"Algorithm: {ca.algorithm}", file=output)
@@ -227,9 +181,6 @@ def _run_ca_init(
             )
     except (CAFileError, ConfigurationError, StateError) as exc:
         raise SystemExit("ski: CA initialization failed") from exc
-    finally:
-        if database is not None:
-            database.close()
 
 
 def _run_ca_show(*, show_all: bool, output: TextIO) -> None:
