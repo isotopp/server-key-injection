@@ -99,10 +99,16 @@ rmdir /tmp/ski-smoke 2>/dev/null || true
 
 ## Intended operation
 
-The production service will use a protected CA and authenticated users to issue
-short-lived certificates. The issuer will generate the temporary identity in
-memory and add it through the user's explicitly forwarded agent connection; it
-will not write the private key to a file or return it in the session transcript.
+The next planned milestone replaces the disposable test CA with one configured,
+persistent SSH user-CA. It will add `ski ca` initialization, public-key
+inspection, and redacted CA-log commands; it will issue 25-hour-by-default
+certificates containing the canonical user and normalized group principals.
+Those certificates will still not be accepted by a production host until the
+later offline host-authorization work is complete.
+
+The issuer generates each user identity in memory and adds it through the
+user's explicitly forwarded agent connection. It will not write that generated
+private key to a file or return it in the session transcript.
 
 Do not commit private keys, CA keys, issued certificates, or agent sockets.
 
