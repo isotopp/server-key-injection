@@ -22,7 +22,7 @@ from ski.configuration import (
 from ski.control import RuntimeControl
 from ski.credentials import OrdinaryIssuanceService
 from ski.identities import IdentitySnapshot, IssuerIdentityProvider, SqliteIdentityStore
-from ski.injection import OrdinaryAgentInjector, TracerAgentInjector
+from ski.injection import OrdinaryAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
 from ski.request_processing import AuthenticatedRequestProcessor
 from ski.server import TracerIssuer
@@ -46,9 +46,6 @@ class IssuerFactory(Protocol):
         *,
         bind: str,
         port: int,
-        request_handler: Callable[
-            [asyncssh.SSHServerConnection], Awaitable[str | None]
-        ],
         authenticated_request_handler: Callable[
             [asyncssh.SSHServerConnection, IdentitySnapshot], Awaitable[str | None]
         ],
@@ -110,7 +107,6 @@ class ServiceRuntime:
         self._close_complete = asyncio.Event()
         self._reload_lock = asyncio.Lock()
         self._control = RuntimeControl()
-        self._injector = TracerAgentInjector()
 
     @property
     def configuration(self) -> RuntimeConfiguration:
@@ -176,7 +172,6 @@ class ServiceRuntime:
             issuer = self._issuer_factory(
                 bind=configuration.bind,
                 port=configuration.port,
-                request_handler=self._handle_tracer_request,
                 authenticated_request_handler=self._handle_authenticated_tracer_request,
                 server_host_key=host_key,
                 identity_store=identity_store,
@@ -334,13 +329,6 @@ class ServiceRuntime:
     async def wait_for_control_event(self) -> str:
         """Wait for either a reload or terminal shutdown request."""
         return await self._control.wait_for_control_event()
-
-    async def _handle_tracer_request(
-        self,
-        connection: Any,
-    ) -> str | None:
-        async with self.request_scope():
-            return await self._injector.handle(connection)
 
     async def _handle_authenticated_tracer_request(
         self,
