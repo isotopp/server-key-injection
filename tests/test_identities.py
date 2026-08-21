@@ -24,6 +24,7 @@ from ski.identities import (
     UserSummary,
 )
 from ski.state import StateDatabase
+from support import raw_sqlite_connection
 
 
 def test_identity_store_migrates_host_key_database_with_ca_state(
@@ -245,12 +246,12 @@ def test_successful_password_verification_rehashes_outdated_parameters(
             password_hasher=cast(PasswordHasher, hasher),
         )
         store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
-        connection = database._connection  # noqa: SLF001
-        connection.execute(
-            "UPDATE users SET password_verifier = '$argon2id$old' "
-            "WHERE username = 'alice'",
-        )
-        connection.commit()
+        with raw_sqlite_connection(database.path) as connection:
+            connection.execute(
+                "UPDATE users SET password_verifier = '$argon2id$old' "
+                "WHERE username = 'alice'",
+            )
+            connection.commit()
 
         assert store.verify_password("alice", "wrong") is False
         assert store.get_user("alice").password_verifier == "$argon2id$old"

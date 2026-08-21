@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+import sqlite3
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,16 @@ from ski.identities import SqliteIdentityStore, UserRecord
 from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.state import StateDatabase
+
+
+@contextmanager
+def raw_sqlite_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open a raw SQLite connection for deliberate corruption setup in tests."""
+    connection = sqlite3.connect(path)
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 class MfaClient(asyncssh.SSHClient):
