@@ -35,7 +35,7 @@ complete, valid configuration or fails before accepting connections.
 
 **Acceptance criteria:**
 
-- Startup searches `./.env`, `$HOME/.ski.env`, then `/etc/ski/env`, stops at the
+- Startup searches `./.env`, `$HOME/.ski.env`, then `/home/ski/etc/env`, stops at the
   first existing file, and gives already exported process environment values
   precedence.
 - Configuration is parsed into an immutable application-level snapshot rather

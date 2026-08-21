@@ -31,7 +31,7 @@ snapshot while `--help` and `--version` remain usable without service state.
 **Behavioural tests, in order:**
 
 1. Loading runtime configuration from controlled paths selects the first of
-   `./.env`, `$HOME/.ski.env`, and `/etc/ski/env`, while a supplied exported
+   `./.env`, `$HOME/.ski.env`, and `/home/ski/etc/env`, while a supplied exported
    environment baseline takes precedence without modifying `os.environ`.
 2. A valid `SKI_CA_DATABASE` and explicit `--bind`/`--port` values produce one
    immutable service configuration snapshot containing its source metadata.

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-SYSTEM_ENVIRONMENT_FILE = Path("/etc/ski/env")
+SYSTEM_ENVIRONMENT_FILE = Path("/home/ski/etc/env")
 
 
 def find_environment_file(

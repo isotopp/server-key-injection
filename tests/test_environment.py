@@ -7,7 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from ski.environment import find_environment_file, load_environment
+from ski.environment import (
+    SYSTEM_ENVIRONMENT_FILE,
+    find_environment_file,
+    load_environment,
+)
+
+
+def test_system_environment_fallback_is_inside_installation_home() -> None:
+    """The deployment fallback keeps configuration below the ski home."""
+    assert SYSTEM_ENVIRONMENT_FILE == Path("/home/ski/etc/env")
 
 
 def test_local_environment_file_takes_precedence(

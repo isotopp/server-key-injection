@@ -3,7 +3,7 @@
 The current implementation is a demo issuer. It runs as one foreground
 `ski serve` process under systemd, stores its state in SQLite, and creates
 short-lived ordinary certificates with the persistent Ed25519 CA configured in
-`/etc/ski/env`. Production-host trust, offline authorization, revocation, and
+`/home/ski/etc/env`. Production-host trust, offline authorization, revocation, and
 CA rotation are documented architecture targets but are not complete in this
 demo.
 
@@ -38,12 +38,13 @@ or credential material.
 
 - Keep NTP synchronized. Certificate validity, the 25-hour renewal window, and
   future KRL expiry cleanup all depend on a correct clock.
-- Back up `/var/lib/ski/ca.sqlite3`, `/etc/ski/keys/user_ca`, its public key,
-  and `/var/lib/ski/revoked.krl` as one protected recovery set. The database
+- Back up `/home/ski/var/lib/ski/ca.sqlite3`, `/home/ski/etc/keys/user_ca`, its
+  public key, and `/home/ski/var/lib/ski/revoked.krl` as one protected recovery
+  set. The database
   contains demo password verifiers and TOTP secrets; encrypt backups and limit
   access. Test restoration without replacing the live CA.
-- Check free space and ownership on `/var/lib/ski`, `/etc/ski`, and
-  `/etc/ski/keys`. The service account needs only the access granted by the
+- Check free space and ownership on `/home/ski/var/lib/ski`, `/home/ski/etc`,
+  and `/home/ski/etc/keys`. The service account needs only the access granted by the
   reviewed unit.
 - Review user and group membership changes:
 
@@ -63,7 +64,7 @@ or credential material.
   member add`. Mutating commands commit SQLite first and request a systemd
   reload when the service is active; if it is stopped, the next start reads the
   committed state.
-- Treat changes to `/etc/ski/env`, CA files, and the unit as deployment events:
+- Treat changes to `/home/ski/etc/env`, CA files, and the unit as deployment events:
   validate them, run `systemctl reload ski.service`, and confirm a new
   `service_ready` event. A failed reload retains the previous working runtime
   configuration.

@@ -32,7 +32,7 @@ order and stops searching:
 
 1. `./.env`
 2. `$HOME/.ski.env`
-3. `/etc/ski/env`
+3. `/home/ski/etc/env`
 
 Values already exported in the shell take precedence over values in that file.
 

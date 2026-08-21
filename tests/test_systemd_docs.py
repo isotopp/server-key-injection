@@ -31,9 +31,11 @@ def test_systemd_unit_declares_hardening_and_operator_contract() -> None:
 
     assert "User=ski" in unit
     assert "Group=ski" in unit
-    assert "WorkingDirectory=/var/lib/ski" in unit
-    assert "Environment=HOME=/var/lib/ski" in unit
-    assert "EnvironmentFile=-/etc/ski/env" in unit
+    assert "WorkingDirectory=/home/ski/var/lib/ski" in unit
+    assert "Environment=HOME=/home/ski" in unit
+    assert "EnvironmentFile=-/home/ski/etc/env" in unit
+    assert "StateDirectory=" not in unit
+    assert "StateDirectoryMode=" not in unit
     assert "Restart=on-failure" in unit
     assert "TimeoutStartSec=30s" in unit
     assert "TimeoutStopSec=30s" in unit
@@ -42,8 +44,8 @@ def test_systemd_unit_declares_hardening_and_operator_contract() -> None:
     assert "NoNewPrivileges=true" in unit
     assert "ProtectSystem=strict" in unit
     assert "ProtectHome=read-only" in unit
-    assert "ReadWritePaths=/var/lib/ski" in unit
-    assert "ReadOnlyPaths=/etc/ski" in unit
+    assert "ReadWritePaths=/home/ski/var/lib/ski" in unit
+    assert "ReadOnlyPaths=/home/ski/etc" in unit
 
 
 def test_installation_guide_covers_prebuilt_deployment_and_native_journal() -> None:
@@ -76,13 +78,19 @@ def test_systemd_analyze_accepts_substituted_example_on_linux(
     unit = UNIT_PATH.read_text()
     unit = unit.replace("User=ski", f"User={getpass.getuser()}")
     unit = unit.replace("Group=ski", f"Group={getpass.getuser()}")
-    unit = unit.replace("WorkingDirectory=/var/lib/ski", f"WorkingDirectory={tmp_path}")
-    unit = unit.replace("Environment=HOME=/var/lib/ski", f"Environment=HOME={tmp_path}")
+    unit = unit.replace(
+        "WorkingDirectory=/home/ski/var/lib/ski",
+        f"WorkingDirectory={tmp_path}",
+    )
+    unit = unit.replace("Environment=HOME=/home/ski", f"Environment=HOME={tmp_path}")
     unit = unit.replace(
         "ExecStart=/home/ski/.local/bin/ski serve", "ExecStart=/bin/true"
     )
-    unit = unit.replace("ReadWritePaths=/var/lib/ski", f"ReadWritePaths={tmp_path}")
-    unit = unit.replace("ReadOnlyPaths=/etc/ski", "ReadOnlyPaths=/etc")
+    unit = unit.replace(
+        "ReadWritePaths=/home/ski/var/lib/ski",
+        f"ReadWritePaths={tmp_path}",
+    )
+    unit = unit.replace("ReadOnlyPaths=/home/ski/etc", "ReadOnlyPaths=/etc")
     candidate = tmp_path / "ski.service"
     candidate.write_text(unit)
 

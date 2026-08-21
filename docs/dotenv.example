@@ -1,10 +1,10 @@
 # Example configuration for ski.
 #
 # Copy this file to .env for a local checkout, or adapt it as
-# /etc/ski/env for a systemd deployment. The application searches, in order:
+# /home/ski/etc/env for a systemd deployment. The application searches, in order:
 #   ./.env
 #   $HOME/.ski.env
-#   /etc/ski/env
+#   /home/ski/etc/env
 # and stops at the first existing file. Exported environment variables take
 # precedence over values in the selected file.
 
@@ -12,7 +12,7 @@
 # writable by the account running ski. SQLite contains the host key, demo
 # identities, persistent CA metadata, and redacted issuance records; it never
 # contains CA or generated user private-key bytes.
-SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
+SKI_CA_DATABASE=/home/ski/var/lib/ski/ca.sqlite3
 
 # The issuer SSH host key is not an environment setting. ski stores its
 # persistent Ed25519 host key in SKI_CA_DATABASE; distributing its public key,
@@ -21,9 +21,9 @@ SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
 # Persistent ordinary user-CA material. Parent directories must already exist
 # and be writable by the account running ski. The CA is Ed25519-only; the
 # private key is never stored in SQLite or printed by the CLI.
-SKI_CA_PRIVATE_KEY=/etc/ski/keys/user_ca
-SKI_CA_PUBLIC_KEY=/etc/ski/keys/user_ca.pub
-SKI_CA_KRL=/var/lib/ski/revoked.krl
+SKI_CA_PRIVATE_KEY=/home/ski/etc/keys/user_ca
+SKI_CA_PUBLIC_KEY=/home/ski/etc/keys/user_ca.pub
+SKI_CA_KRL=/home/ski/var/lib/ski/revoked.krl
 
 # Comma-separated ordinary certificate extensions. The supported values map to
 # OpenSSH certificate extensions as follows:

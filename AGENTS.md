@@ -27,7 +27,7 @@ Use Python through `uv`; do not invoke a system Python directly for project
 tasks. Keep the package layout under `src/` and add tests under `tests/`.
 
 Environment configuration is loaded once at CLI startup with `python-dotenv`.
-Search `./.env`, then `$HOME/.ski.env`, then `/etc/ski/env`, stopping at the
+Search `./.env`, then `$HOME/.ski.env`, then `/home/ski/etc/env`, stopping at the
 first existing file. Existing process environment variables take precedence.
 
 Run these commands before handing off a change:

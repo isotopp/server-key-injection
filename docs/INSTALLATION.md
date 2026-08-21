@@ -16,26 +16,26 @@ The service account must be able to bind the configured port. The example unit
 uses `CAP_NET_BIND_SERVICE` for port 22. Adapt the unit and firewall rules to
 the host's policy before exposing it.
 
-## Clone and install
-
-Clone the repository from its `origin` GitHub repository and install the
-development environment:
-
-```console
-git clone git@github.com:isotopp/server-key-injection.git ski
-cd ski
-uv sync
-```
-
 Create the service account and its state directories. Keep the CA private key
 under a dedicated directory that is readable only by the service account:
 
 ```console
 sudo useradd --system --home-dir /home/ski --create-home \
   --shell /usr/sbin/nologin ski
-sudo install -d -o ski -g ski -m 0700 /var/lib/ski
-sudo install -d -o root -g ski -m 0750 /etc/ski
-sudo install -d -o ski -g ski -m 0700 /etc/ski/keys
+sudo install -d -o ski -g ski -m 0700 /home/ski/var/lib/ski
+sudo install -d -o ski -g ski -m 0700 /home/ski/etc
+sudo install -d -o ski -g ski -m 0700 /home/ski/etc/keys
+```
+
+## Clone and install
+
+Clone the repository from its `origin` GitHub repository into the installation
+user's home and install the development environment there:
+
+```console
+sudo -u ski -H git clone git@github.com:isotopp/server-key-injection.git \
+  /home/ski/ski
+sudo -u ski -H sh -lc 'cd /home/ski/ski && uv sync'
 ```
 
 Install the checked-out revision as the service account. This keeps the
@@ -43,26 +43,28 @@ runtime executable and its dependencies outside the source checkout:
 
 ```console
 sudo -u ski -H sh -lc \
-  'cd /path/to/ski && uv tool install . --with systemd-python'
+  'cd /home/ski/ski && uv tool install . --with systemd-python'
 ```
 
-Replace `/path/to/ski` with the absolute clone path.
+All application code, the uv tool, configuration, CA files, and SQLite state
+now live below `/home/ski` and are owned by `ski`. The systemd unit installed
+below is the sole root-owned deployment metadata required by a system service.
 
 ## Configure and initialize the CA
 
-Create `/etc/ski/env` and set the paths below. Parent directories must exist;
+Create `/home/ski/etc/env` and set the paths below. Parent directories must exist;
 `ski ca init` refuses to replace existing CA material.
 
 ```console
-sudo install -o root -g ski -m 0640 /dev/null /etc/ski/env
-sudoedit /etc/ski/env
+sudo install -o ski -g ski -m 0600 /dev/null /home/ski/etc/env
+sudoedit /home/ski/etc/env
 ```
 
 ```dotenv
-SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
-SKI_CA_PRIVATE_KEY=/etc/ski/keys/user_ca
-SKI_CA_PUBLIC_KEY=/etc/ski/keys/user_ca.pub
-SKI_CA_KRL=/var/lib/ski/revoked.krl
+SKI_CA_DATABASE=/home/ski/var/lib/ski/ca.sqlite3
+SKI_CA_PRIVATE_KEY=/home/ski/etc/keys/user_ca
+SKI_CA_PUBLIC_KEY=/home/ski/etc/keys/user_ca.pub
+SKI_CA_KRL=/home/ski/var/lib/ski/revoked.krl
 ORDINARY_CERT_EXTENSIONS=pty
 ```
 
@@ -108,7 +110,7 @@ not yet make production hosts trust the CA.
 Install the reviewed unit, then start the daemon:
 
 ```console
-sudo install -o root -g root -m 0644 docs/systemd/ski.service \
+sudo install -o root -g root -m 0644 /home/ski/ski/docs/systemd/ski.service \
   /etc/systemd/system/ski.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now ski.service

@@ -55,9 +55,18 @@ systemd. In development, `uv run ski serve` is the normal invocation. In a
 production unit, deployment first creates the locked uv environment and
 `ExecStart` invokes that environment's `ski serve` executable; it does not
 resolve or install dependencies during service startup. The service runs under
-a dedicated `ski` account. Binding port 22 is supplied by the operating system,
-for example through `CAP_NET_BIND_SERVICE`; `ski` itself does not implement an
-additional administrator authorization model.
+a dedicated `ski` account whose home is `/home/ski`. Its application-local
+state and configuration are `/home/ski/var/lib/ski` and `/home/ski/etc`, rather
+than system-global `/var/lib` and `/etc` paths. Binding port 22 is supplied by
+the operating system, for example through `CAP_NET_BIND_SERVICE`; `ski` itself
+does not implement an additional administrator authorization model.
+
+The source checkout, uv tool installation, environment file, CA material,
+SQLite database, KRL, and service working directory are all below
+`/home/ski` and owned by the installation account wherever possible. A
+system-level systemd deployment necessarily has one root-owned unit file in
+`/etc/systemd/system`; that file contains no secrets or mutable application
+state.
 
 The systemd unit uses `Type=simple`. systemd therefore considers the unit
 started when the service process has been executed, before application startup
@@ -187,13 +196,13 @@ operational responsibilities; `ski` has no host-key configuration setting,
 automatic rotation, or host-key administration command.
 
 The `.env` configuration records file locations, not private-key material. A
-production `/etc/ski/env` may contain:
+production `/home/ski/etc/env` may contain:
 
 ```dotenv
-SKI_CA_PRIVATE_KEY=/etc/ski/keys/user_ca
-SKI_CA_PUBLIC_KEY=/etc/ski/keys/user_ca.pub
-SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
-SKI_CA_KRL=/var/lib/ski/revoked.krl
+SKI_CA_PRIVATE_KEY=/home/ski/etc/keys/user_ca
+SKI_CA_PUBLIC_KEY=/home/ski/etc/keys/user_ca.pub
+SKI_CA_DATABASE=/home/ski/var/lib/ski/ca.sqlite3
+SKI_CA_KRL=/home/ski/var/lib/ski/revoked.krl
 SKI_CERTIFICATE_LIFETIME=25h
 ```
 
