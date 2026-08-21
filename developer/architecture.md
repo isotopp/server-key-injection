@@ -47,6 +47,8 @@ uv run ski serve [--bind IP] [--port PORT]
 `--bind` defaults to `*`, which means that the daemon binds both `0.0.0.0` and
 `::`. Startup fails if either required wildcard listener cannot be opened.
 `--port` defaults to `22`. A specific address may be supplied with `--bind`.
+The daemon owns these listening sockets. The deployment does not use systemd
+socket activation or inherit listening file descriptors from a `.socket` unit.
 
 The deployment target is a single active issuer instance supervised by
 systemd. In development, `uv run ski serve` is the normal invocation. In a
@@ -57,17 +59,31 @@ a dedicated `ski` account. Binding port 22 is supplied by the operating system,
 for example through `CAP_NET_BIND_SERVICE`; `ski` itself does not implement an
 additional administrator authorization model.
 
-The daemon writes structured logs to standard output and standard error.
-systemd/journald collects these records, and `journalctl -u ski.service` is the
-operator log interface. Certificate serials, canonical identities, decisions,
-and request IDs may be logged; private keys, passwords, TOTP secrets, and
-agent payloads must not be logged.
+The systemd unit uses `Type=simple`. systemd therefore considers the unit
+started when the service process has been executed, before application startup
+validation necessarily completes. After configuration, SQLite state, the
+single-instance lock, and every requested listener are ready, `ski` emits a
+structured application-level ready event. This event is operational evidence,
+not an `sd_notify` readiness protocol. Startup failures exit nonzero and are
+reported through the journal.
+
+The daemon writes structured records through the native journald API using the
+`systemd-python` binding. Application fields use stable journal names such as
+`SKI_EVENT`, `SKI_REQUEST_ID`, `SKI_CERTIFICATE_SERIAL`, and
+`SKI_DECISION`, alongside standard fields such as `MESSAGE`, `PRIORITY`, and
+`SYSLOG_IDENTIFIER`. This makes application fields directly queryable instead
+of embedding JSON inside the journal's `MESSAGE` field. `journalctl -u
+ski.service` is the operator log interface. Certificate serials, canonical
+identities, decisions, and request IDs may be logged; private keys, passwords,
+TOTP secrets, agent payloads, and complete environment values must not be
+logged. Logging is isolated behind an application interface so tests can use
+an in-memory sink without requiring systemd or a running journal.
 
 The systemd service owns process lifecycle:
 
 | Event | Daemon behaviour |
 | --- | --- |
-| service start | Validate configuration, open SQLite, reconcile the KRL, bind listeners, then report readiness. |
+| service start | Validate configuration, open SQLite, reconcile the KRL, bind application-owned listeners, then emit the structured ready event. |
 | `SIGTERM` | Stop accepting new connections, allow bounded in-flight issuance work to finish or cancel it, then exit. |
 | `SIGINT` | Apply the same graceful shutdown behaviour for development. |
 | `SIGHUP` / `systemctl reload ski.service` | Validate and reload `.env`-derived configuration and file-backed/CA state. Retain the previous working configuration if reload fails. |
