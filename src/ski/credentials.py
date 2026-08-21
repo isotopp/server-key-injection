@@ -72,6 +72,14 @@ class OrdinaryIdentity:
         return self.private_key, self.certificate
 
 
+@dataclass(frozen=True, slots=True)
+class FailureEventOutcome:
+    """Internal result of attempting to append a failed-operation event."""
+
+    recorded: bool
+    error_code: str | None = None
+
+
 class OrdinaryCertificateFactory:
     """Construct fixed-lifetime Ed25519 certificates from a validated CA."""
 
@@ -192,8 +200,12 @@ class OrdinaryIssuanceService:
             request_id=request_id,
         )
 
-    def record_failure(self, identity: IdentitySnapshot, request_id: str) -> None:
-        """Append a safe failed-operation event when durable state permits it."""
+    def record_failure(
+        self,
+        identity: IdentitySnapshot,
+        request_id: str,
+    ) -> FailureEventOutcome:
+        """Append a safe failed-operation event and report its internal outcome."""
         try:
             self._database.record_event(
                 kind="certificate_failed",
@@ -202,8 +214,9 @@ class OrdinaryIssuanceService:
                 identity=identity.username,
                 ca_id=self._active_ca.record.ca_id,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            return FailureEventOutcome(False, type(exc).__name__)
+        return FailureEventOutcome(True)
 
 
 class DisposableCertificateFactory:

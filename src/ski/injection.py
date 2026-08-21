@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 import asyncssh
 
@@ -14,6 +14,7 @@ from ski.ca import ValidatedActiveCA
 from ski.credentials import (
     TRACER_CERTIFICATE_LIFETIME,
     DisposableCertificateFactory,
+    FailureEventOutcome,
     OrdinaryIdentity,
     OrdinaryIssuanceService,
 )
@@ -88,18 +89,25 @@ class AsyncSSHAgentAdapter:
             lifetime=lifetime,
         )
 
-    async def remove_credential(self, credential: OrdinaryIdentity) -> None:
-        """Remove both agent entries associated with one generated credential."""
-        try:
-            for public_data in (
-                credential.public_key.public_data,
-                credential.certificate.public_data,
-            ):
+    async def remove_credential(
+        self,
+        credential: OrdinaryIdentity,
+    ) -> AgentCleanupOutcome:
+        """Remove both agent entries and report partial cleanup explicitly."""
+        removed = 0
+        failures: list[str] = []
+        for public_data in (
+            credential.public_key.public_data,
+            credential.certificate.public_data,
+        ):
+            try:
                 added = await self._client.get_keys([public_data])
                 if added:
                     await self._client.remove_keys(list(added))
-        except Exception:
-            pass
+                    removed += len(added)
+            except Exception as exc:
+                failures.append(type(exc).__name__)
+        return AgentCleanupOutcome(removed, tuple(failures))
 
     def _is_owned(
         self,
@@ -135,6 +143,36 @@ class AsyncSSHAgentAdapter:
             return False
         marker = f"ski:{username}:{self._active_ca.record.fingerprint}:{serial}"
         return comment == marker
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCleanupOutcome:
+    """Internal result of removing one generated credential from an agent."""
+
+    removed: int
+    error_codes: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Return whether every attempted cleanup operation succeeded."""
+        return not self.error_codes
+
+
+@dataclass(frozen=True, slots=True)
+class IssuanceFailureOutcome:
+    """Internal evidence collected for one failed issuance attempt."""
+
+    cause_code: str
+    cleanup: AgentCleanupOutcome | None
+    audit: FailureEventOutcome
+
+
+class IssuanceWorkflowError(StateError):
+    """Safe internal failure carrying cleanup and audit outcomes."""
+
+    def __init__(self, outcome: IssuanceFailureOutcome) -> None:
+        super().__init__("ordinary certificate request failed")
+        self.outcome = outcome
 
 
 @asynccontextmanager
@@ -192,19 +230,48 @@ class OrdinaryAgentInjector:
                                 request_id=request_id,
                             )
                         except DuplicateCertificateSerialError:
-                            await agent.remove_credential(credential)
+                            cleanup = await agent.remove_credential(credential)
+                            if not cleanup.complete:
+                                raise StateError("credential cleanup failed")
                             continue
                         return OrdinaryInjectionResult(
                             credential=credential,
                             record=record,
                             groups=identity.groups,
                         )
-                except Exception:
+                except Exception as exc:
                     if credential is not None:
-                        await agent.remove_credential(credential)
-                    raise
-        except Exception:
-            self._issuance.record_failure(identity, request_id)
+                        cleanup_outcome = await agent.remove_credential(credential)
+                    else:
+                        cleanup_outcome = None
+                    self._raise_workflow_failure(
+                        exc, cleanup_outcome, identity, request_id
+                    )
+        except IssuanceWorkflowError:
             raise
-        self._issuance.record_failure(identity, request_id)
-        raise StateError("certificate serial allocation failed")
+        except Exception as exc:
+            self._raise_workflow_failure(exc, None, identity, request_id)
+        self._raise_workflow_failure(
+            StateError("certificate serial allocation failed"),
+            None,
+            identity,
+            request_id,
+        )
+
+    def _raise_workflow_failure(
+        self,
+        cause: Exception,
+        cleanup: AgentCleanupOutcome | None,
+        identity: IdentitySnapshot,
+        request_id: str,
+    ) -> NoReturn:
+        """Raise one safe failure carrying explicit cleanup and audit evidence."""
+        try:
+            audit = self._issuance.record_failure(identity, request_id)
+        except Exception as exc:
+            audit = FailureEventOutcome(False, type(exc).__name__)
+        if not isinstance(audit, FailureEventOutcome):
+            audit = FailureEventOutcome(False, "invalid_outcome")
+        raise IssuanceWorkflowError(
+            IssuanceFailureOutcome(type(cause).__name__, cleanup, audit),
+        ) from cause
