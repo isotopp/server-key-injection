@@ -39,6 +39,118 @@ def test_service_runtime_starts_state_and_listener_before_ready_event(
     asyncio.run(exercise())
 
 
+def test_runtime_reload_swaps_a_valid_configuration_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A valid reload advances the generation without moving the listener."""
+    (tmp_path / ".env").write_text(
+        f"SKI_CA_DATABASE={tmp_path / 'state.sqlite3'}\nSKI_CONFIG_MARKER=one\n",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    async def exercise() -> None:
+        sink = MemoryEventSink()
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"HOME": str(tmp_path)},
+            event_sink=sink,
+        )
+        await runtime.start()
+        try:
+            assert runtime.configuration.values["SKI_CONFIG_MARKER"] == "one"
+            first_port = runtime.issuer.port
+            (tmp_path / ".env").write_text(
+                f"SKI_CA_DATABASE={tmp_path / 'state.sqlite3'}\n"
+                "SKI_CONFIG_MARKER=two\n",
+            )
+
+            assert await runtime.reload()
+            assert runtime.configuration.values["SKI_CONFIG_MARKER"] == "two"
+            assert runtime.configuration_generation == 2
+            assert runtime.issuer.port == first_port
+            assert sink.events[-1].name == "service_reload_accepted"
+        finally:
+            await runtime.close()
+
+    asyncio.run(exercise())
+
+
+def test_runtime_reload_rejects_startup_only_changes_and_invalid_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Rejected reloads leave the complete previous snapshot active."""
+    database_path = tmp_path / "state.sqlite3"
+    (tmp_path / ".env").write_text(
+        f"SKI_CA_DATABASE={database_path}\nSKI_CONFIG_MARKER=one\n",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    async def exercise() -> None:
+        sink = MemoryEventSink()
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"HOME": str(tmp_path)},
+            event_sink=sink,
+        )
+        await runtime.start()
+        try:
+            (tmp_path / ".env").write_text(
+                f"SKI_CA_DATABASE={tmp_path / 'other.sqlite3'}\n"
+                "SKI_CONFIG_MARKER=two\n",
+            )
+            assert not await runtime.reload()
+            assert runtime.configuration.values["SKI_CONFIG_MARKER"] == "one"
+            assert sink.events[-1].fields["SKI_ERROR_CODE"] == "restart_required"
+
+            (tmp_path / ".env").write_text("SKI_CONFIG_MARKER=three\n")
+            assert not await runtime.reload()
+            assert runtime.configuration.values["SKI_CONFIG_MARKER"] == "one"
+            assert sink.events[-1].name == "service_reload_rejected"
+        finally:
+            await runtime.close()
+
+    asyncio.run(exercise())
+
+
+def test_requests_keep_the_snapshot_with_which_they_started(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Requests retain their original snapshot across an accepted reload."""
+    database_path = tmp_path / "state.sqlite3"
+    (tmp_path / ".env").write_text(
+        f"SKI_CA_DATABASE={database_path}\nSKI_CONFIG_MARKER=one\n",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    async def exercise() -> None:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"HOME": str(tmp_path)},
+            event_sink=MemoryEventSink(),
+        )
+        await runtime.start()
+        try:
+            async with runtime.request_scope() as request_configuration:
+                (tmp_path / ".env").write_text(
+                    f"SKI_CA_DATABASE={database_path}\nSKI_CONFIG_MARKER=two\n",
+                )
+                assert await runtime.reload()
+                assert request_configuration.values["SKI_CONFIG_MARKER"] == "one"
+
+            async with runtime.request_scope() as request_configuration:
+                assert request_configuration.values["SKI_CONFIG_MARKER"] == "two"
+        finally:
+            await runtime.close()
+
+    asyncio.run(exercise())
+
+
 def test_service_runtime_reports_state_failure_without_starting_listener(
     tmp_path: Path,
 ) -> None:
@@ -205,6 +317,26 @@ def test_shutdown_request_wakes_the_foreground_waiter(tmp_path: Path) -> None:
         waiter = asyncio.create_task(runtime.wait_for_shutdown())
         runtime.request_shutdown()
         await waiter
+        await runtime.close()
+
+    asyncio.run(exercise())
+
+
+def test_control_waiter_distinguishes_reload_from_shutdown(tmp_path: Path) -> None:
+    """The foreground loop can process SIGHUP without stopping."""
+
+    async def exercise() -> None:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            event_sink=MemoryEventSink(),
+        )
+        await runtime.start()
+        runtime.request_reload()
+        assert await runtime.wait_for_control_event() == "reload"
+        runtime.request_shutdown()
+        assert await runtime.wait_for_control_event() == "shutdown"
         await runtime.close()
 
     asyncio.run(exercise())

@@ -10,7 +10,11 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
-from ski.configuration import RuntimeConfiguration, load_runtime_configuration
+from ski.configuration import (
+    ConfigurationError,
+    RuntimeConfiguration,
+    load_runtime_configuration,
+)
 from ski.injection import TracerAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
 from ski.server import TracerIssuer
@@ -51,6 +55,7 @@ class ServiceRuntime:
         self._state_opener = state_opener
         self._issuer_factory = issuer_factory
         self._configuration: RuntimeConfiguration | None = None
+        self._configuration_generation = 0
         self._state: StateDatabase | None = None
         self._issuer: TracerIssuer | None = None
         self._in_flight: set[asyncio.Task[Any]] = set()
@@ -58,6 +63,8 @@ class ServiceRuntime:
         self._close_started = False
         self._close_complete = asyncio.Event()
         self._shutdown_requested = asyncio.Event()
+        self._reload_requested = asyncio.Event()
+        self._reload_lock = asyncio.Lock()
         self._injector = TracerAgentInjector()
 
     @property
@@ -80,6 +87,11 @@ class ServiceRuntime:
         if self._issuer is None:
             raise RuntimeError("service runtime is not started")
         return self._issuer
+
+    @property
+    def configuration_generation(self) -> int:
+        """Return the generation number of the active configuration."""
+        return self._configuration_generation
 
     async def start(self) -> None:
         """Start all resources, or unwind every resource acquired so far."""
@@ -104,6 +116,7 @@ class ServiceRuntime:
             self._issuer = issuer
             await issuer.start()
             self._configuration = configuration
+            self._configuration_generation = 1
         except Exception as exc:
             await self._cleanup_resources()
             self._emit(
@@ -125,6 +138,50 @@ class ServiceRuntime:
                 "SKI_PORT": str(self.issuer.port),
             },
         )
+
+    async def reload(self) -> bool:
+        """Serialize configuration reload attempts."""
+        async with self._reload_lock:
+            return await self._reload_once()
+
+    async def _reload_once(self) -> bool:
+        """Validate and atomically adopt a reloadable configuration candidate."""
+        if self._configuration is None:
+            raise RuntimeError("service runtime is not started")
+
+        self._emit("service_reload_started", "ski configuration reload requested")
+        try:
+            candidate = load_runtime_configuration(
+                bind=self.bind,
+                port=self.port,
+                exported_environment=self._exported_environment,
+                allow_ephemeral_port=self.port == 0,
+            )
+            if candidate.database != self._configuration.database:
+                raise ConfigurationError("restart required for database path change")
+        except Exception as exc:
+            error_code = (
+                "restart_required"
+                if isinstance(exc, ConfigurationError)
+                and str(exc).startswith("restart required")
+                else type(exc).__name__
+            )
+            self._emit(
+                "service_reload_rejected",
+                "ski configuration reload rejected",
+                fields={"SKI_ERROR_CODE": error_code},
+                priority=4,
+            )
+            return False
+
+        self._configuration = candidate
+        self._configuration_generation += 1
+        self._emit(
+            "service_reload_accepted",
+            "ski configuration reload accepted",
+            fields={"SKI_CONFIG_GENERATION": str(self._configuration_generation)},
+        )
+        return True
 
     async def close(
         self,
@@ -151,11 +208,12 @@ class ServiceRuntime:
             if state is not None:
                 state.close()
             self._configuration = None
+            self._configuration_generation = 0
             self._emit("service_stopped", "ski shutdown complete")
             self._close_complete.set()
 
     @asynccontextmanager
-    async def request_scope(self) -> AsyncIterator[None]:
+    async def request_scope(self) -> AsyncIterator[RuntimeConfiguration]:
         """Track one admitted request until it finishes or is cancelled."""
         if self._stopping or self._issuer is None:
             raise RuntimeError("service runtime is stopping or not started")
@@ -164,7 +222,7 @@ class ServiceRuntime:
             raise RuntimeError("request scope requires an asyncio task")
         self._in_flight.add(task)
         try:
-            yield
+            yield self.configuration
         finally:
             self._in_flight.discard(task)
 
@@ -172,16 +230,28 @@ class ServiceRuntime:
         """Request foreground shutdown from a signal handler."""
         self._shutdown_requested.set()
 
+    def request_reload(self) -> None:
+        """Request a serialized configuration reload from a signal handler."""
+        self._reload_requested.set()
+
     def install_signal_handlers(
         self,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> Callable[[], None]:
         """Install SIGTERM/SIGINT handlers and return their removal callback."""
         event_loop = asyncio.get_running_loop() if loop is None else loop
-        installed: list[signal.Signals] = []
-        for signum in (signal.SIGTERM, signal.SIGINT):
+        installed: list[int] = []
+        signals = [signal.SIGTERM, signal.SIGINT]
+        if hasattr(signal, "SIGHUP"):
+            signals.append(signal.SIGHUP)
+        for signum in signals:
             try:
-                event_loop.add_signal_handler(signum, self.request_shutdown)
+                callback = (
+                    self.request_reload
+                    if signum == signal.SIGHUP
+                    else self.request_shutdown
+                )
+                event_loop.add_signal_handler(signum, callback)
             except (NotImplementedError, RuntimeError):
                 continue
             installed.append(signum)
@@ -195,6 +265,22 @@ class ServiceRuntime:
     async def wait_for_shutdown(self) -> None:
         """Wait until a foreground shutdown signal has been requested."""
         await self._shutdown_requested.wait()
+
+    async def wait_for_control_event(self) -> str:
+        """Wait for either a reload or terminal shutdown request."""
+        shutdown = asyncio.create_task(self._shutdown_requested.wait())
+        reload_request = asyncio.create_task(self._reload_requested.wait())
+        done, pending = await asyncio.wait(
+            (shutdown, reload_request),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if shutdown in done:
+            return "shutdown"
+        self._reload_requested.clear()
+        return "reload"
 
     async def _handle_tracer_request(
         self,

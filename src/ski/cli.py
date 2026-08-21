@@ -55,7 +55,8 @@ async def serve_foreground(*, bind: str, port: int) -> None:
     remove_signal_handlers = runtime.install_signal_handlers()
     try:
         await runtime.start()
-        await runtime.wait_for_shutdown()
+        while await runtime.wait_for_control_event() != "shutdown":
+            await runtime.reload()
     finally:
         remove_signal_handlers()
         await runtime.close()

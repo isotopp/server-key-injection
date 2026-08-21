@@ -94,3 +94,45 @@ def test_serve_exits_cleanly_on_service_signal(
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+def test_serve_reloads_on_sighup_without_exiting(tmp_path: Path) -> None:
+    """SIGHUP reloads configuration and leaves the foreground service alive."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    environment = os.environ.copy()
+    environment["SKI_CA_DATABASE"] = str(tmp_path / "state.sqlite3")
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from ski.cli import main; main()",
+            "serve",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stderr is not None
+        output = process.stderr.readline()
+        assert "service_starting" in output
+        output += process.stderr.readline()
+        assert "service_ready" in output
+        process.send_signal(signal.SIGHUP)
+        reload_output = process.stderr.readline() + process.stderr.readline()
+        assert "service_reload_accepted" in reload_output
+        assert process.poll() is None
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=5) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
