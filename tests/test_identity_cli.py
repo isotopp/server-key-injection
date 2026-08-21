@@ -22,6 +22,17 @@ class _ActiveServiceManager:
         return None
 
 
+class _CountingServiceManager:
+    def __init__(self) -> None:
+        self.reload_calls = 0
+
+    def is_active(self) -> bool:
+        return True
+
+    def reload(self) -> None:
+        self.reload_calls += 1
+
+
 def test_user_add_enrolls_a_user_and_displays_totp_material_once(
     monkeypatch,
     tmp_path: Path,
@@ -252,6 +263,12 @@ def test_user_add_duplicate_is_atomic_and_does_not_notify(
         ["user", "disable", "--help"],
         ["user", "password", "set", "--help"],
         ["user", "totp", "regenerate", "--help"],
+        ["group", "add", "--help"],
+        ["group", "remove", "--help"],
+        ["group", "show", "--help"],
+        ["group", "list", "--help"],
+        ["group", "member", "add", "--help"],
+        ["group", "member", "remove", "--help"],
     ],
 )
 def test_identity_command_help_never_opens_the_database(
@@ -262,6 +279,122 @@ def test_identity_command_help_never_opens_the_database(
     with pytest.raises(SystemExit, match="0"):
         build_parser().parse_args(command)
     assert "usage:" in capsys.readouterr().out
+
+
+def test_group_add_show_and_list_expose_only_canonical_group_data(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Group commands create and inspect names without credential material."""
+    database_path = tmp_path / "state.sqlite3"
+    monkeypatch.setenv("SKI_CA_DATABASE", str(database_path))
+    notifier = ServiceReloadNotifier(_ActiveServiceManager())
+
+    added = io.StringIO()
+    main(["group", "add", "platform-ops"], notifier=notifier, output=added)
+    assert "platform-ops" in added.getvalue()
+
+    shown = io.StringIO()
+    main(["group", "show", "platform-ops"], output=shown)
+    assert shown.getvalue().splitlines() == [
+        "Group: platform-ops",
+        "Members: (none)",
+    ]
+
+    listing = io.StringIO()
+    main(["group", "list"], output=listing)
+    assert listing.getvalue().splitlines() == ["platform-ops"]
+
+
+def test_group_membership_add_remove_is_atomic_and_rejects_duplicates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Membership commands update one edge and reject duplicate or absent edges."""
+    database_path = tmp_path / "state.sqlite3"
+    monkeypatch.setenv("SKI_CA_DATABASE", str(database_path))
+    database = StateDatabase.open(database_path)
+    try:
+        store = SqliteIdentityStore(database)
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        store.create_group("ops")
+    finally:
+        database.close()
+
+    manager = _CountingServiceManager()
+    notifier = ServiceReloadNotifier(manager)
+    main(
+        ["group", "member", "add", "ops", "alice"],
+        notifier=notifier,
+        output=io.StringIO(),
+    )
+    assert manager.reload_calls == 1
+    with pytest.raises(SystemExit, match="membership"):
+        main(
+            ["group", "member", "add", "ops", "alice"],
+            notifier=notifier,
+            output=io.StringIO(),
+        )
+    assert manager.reload_calls == 1
+
+    shown = io.StringIO()
+    main(["group", "show", "ops"], output=shown)
+    assert shown.getvalue().splitlines() == ["Group: ops", "Members: alice"]
+
+    main(
+        ["group", "member", "remove", "ops", "alice"],
+        notifier=notifier,
+        output=io.StringIO(),
+    )
+    assert manager.reload_calls == 2
+    with pytest.raises(SystemExit, match="membership"):
+        main(
+            ["group", "member", "remove", "ops", "alice"],
+            notifier=notifier,
+            output=io.StringIO(),
+        )
+    assert manager.reload_calls == 2
+
+
+def test_group_remove_requires_empty_group(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Group removal rejects memberships and deletes only empty groups."""
+    database_path = tmp_path / "state.sqlite3"
+    monkeypatch.setenv("SKI_CA_DATABASE", str(database_path))
+    database = StateDatabase.open(database_path)
+    try:
+        store = SqliteIdentityStore(database)
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        store.create_group("ops")
+        store.create_group("empty")
+        store.add_membership("ops", "alice")
+    finally:
+        database.close()
+
+    manager = _CountingServiceManager()
+    notifier = ServiceReloadNotifier(manager)
+    with pytest.raises(SystemExit, match="group removal failed"):
+        main(
+            ["group", "remove", "ops"],
+            notifier=notifier,
+            output=io.StringIO(),
+        )
+    assert manager.reload_calls == 0
+
+    main(
+        ["group", "remove", "empty"],
+        notifier=notifier,
+        output=io.StringIO(),
+    )
+    assert manager.reload_calls == 1
+
+    database = StateDatabase.open(database_path)
+    try:
+        assert SqliteIdentityStore(database).list_groups() == ("ops",)
+    finally:
+        database.close()
 
 
 def test_user_enable_disable_preserves_credentials_and_groups(

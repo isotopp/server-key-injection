@@ -123,6 +123,10 @@ class IdentityStore(ABC):
         """Return canonical group names in stable order."""
 
     @abstractmethod
+    def get_group_members(self, name: str) -> tuple[str, ...]:
+        """Return one group's canonical member names in stable order."""
+
+    @abstractmethod
     def remove_group(self, name: str) -> None:
         """Remove an empty canonical group."""
 
@@ -312,6 +316,32 @@ class SqliteIdentityStore(IdentityStore):
             names = tuple(validate_group_name(row[0]) for row in rows)
             return names
         except IdentityStoreError as exc:
+            raise IdentityDataError("identity data is malformed") from exc
+        except Exception as exc:
+            raise IdentityUnavailableError("identity data is unavailable") from exc
+
+    def get_group_members(self, name: str) -> tuple[str, ...]:
+        name = validate_group_name(name)
+        try:
+            if (
+                self._database._connection.execute(  # noqa: SLF001
+                    "SELECT 1 FROM groups WHERE name = ?", (name,)
+                ).fetchone()
+                is None
+            ):
+                raise IdentityNotFoundError("group is not available")
+            rows = self._database._connection.execute(  # noqa: SLF001
+                "SELECT username FROM user_groups "
+                "WHERE group_name = ? ORDER BY username",
+                (name,),
+            ).fetchall()
+            members = tuple(validate_username(row[0]) for row in rows)
+            if len(set(members)) != len(members):
+                raise IdentityDataError("group membership is duplicated")
+            return members
+        except IdentityStoreError as exc:
+            if isinstance(exc, IdentityNotFoundError):
+                raise
             raise IdentityDataError("identity data is malformed") from exc
         except Exception as exc:
             raise IdentityUnavailableError("identity data is unavailable") from exc

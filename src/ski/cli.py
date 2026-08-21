@@ -75,6 +75,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="replace a TOTP secret",
     )
     totp_regenerate.add_argument("username")
+    group = commands.add_parser("group", help="administer demo groups")
+    group_commands = group.add_subparsers(dest="group_command", required=True)
+    group_add = group_commands.add_parser("add", help="create a demo group")
+    group_add.add_argument("group")
+    group_remove = group_commands.add_parser("remove", help="remove an empty group")
+    group_remove.add_argument("group")
+    group_show = group_commands.add_parser("show", help="show group members")
+    group_show.add_argument("group")
+    group_commands.add_parser("list", help="list demo groups")
+    member = group_commands.add_parser("member", help="manage group membership")
+    member_commands = member.add_subparsers(dest="member_command", required=True)
+    for member_action in ("add", "remove"):
+        member_parser = member_commands.add_parser(
+            member_action,
+            help=f"{member_action} group membership",
+        )
+        member_parser.add_argument("group")
+        member_parser.add_argument("username")
     return parser
 
 
@@ -262,6 +280,108 @@ def _run_user_totp_regenerate(
         database.close()
 
 
+def _run_group_add(
+    name: str,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    """Create one group and notify after the committed mutation."""
+    database, store = _open_identity_store()
+    try:
+        store.create_group(name)
+        notification = notifier.notify_after_mutation()
+        print(f"Group created: {name}", file=output)
+        if not notification.succeeded:
+            raise SystemExit(
+                "ski: service notification failed; mutation committed; "
+                "retry notification",
+            )
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: group creation failed: {exc}") from exc
+    finally:
+        database.close()
+
+
+def _run_group_show(name: str, *, output: TextIO) -> None:
+    """Render one group and its non-secret member names."""
+    database, store = _open_identity_store()
+    try:
+        members = store.get_group_members(name)
+        print(f"Group: {name}", file=output)
+        rendered_members = ", ".join(members) if members else "(none)"
+        print(f"Members: {rendered_members}", file=output)
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: unable to show group: {exc}") from exc
+    finally:
+        database.close()
+
+
+def _run_group_list(*, output: TextIO) -> None:
+    """Render all canonical group names without credentials."""
+    database, store = _open_identity_store()
+    try:
+        for name in store.list_groups():
+            print(name, file=output)
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: unable to list groups: {exc}") from exc
+    finally:
+        database.close()
+
+
+def _run_group_remove(
+    name: str,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    """Remove an empty group and notify after commit."""
+    database, store = _open_identity_store()
+    try:
+        store.remove_group(name)
+        notification = notifier.notify_after_mutation()
+        print(f"Group removed: {name}", file=output)
+        if not notification.succeeded:
+            raise SystemExit(
+                "ski: service notification failed; mutation committed; "
+                "retry notification",
+            )
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: group removal failed: {exc}") from exc
+    finally:
+        database.close()
+
+
+def _run_group_membership(
+    group: str,
+    username: str,
+    *,
+    add: bool,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    """Change one membership edge and notify after commit."""
+    database, store = _open_identity_store()
+    try:
+        if add:
+            store.add_membership(group, username)
+            action = "added"
+        else:
+            store.remove_membership(group, username)
+            action = "removed"
+        notification = notifier.notify_after_mutation()
+        print(f"Membership {action}: {group} {username}", file=output)
+        if not notification.succeeded:
+            raise SystemExit(
+                "ski: service notification failed; mutation committed; "
+                "retry notification",
+            )
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: membership change failed: {exc}") from exc
+    finally:
+        database.close()
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -304,6 +424,30 @@ def main(
         _run_user_password_set(
             args.username,
             secret_reader=getpass.getpass if secret_reader is None else secret_reader,
+            notifier=ServiceReloadNotifier() if notifier is None else notifier,
+            output=output if output is not None else sys.stdout,
+        )
+    elif args.command == "group" and args.group_command == "add":
+        _run_group_add(
+            args.group,
+            notifier=ServiceReloadNotifier() if notifier is None else notifier,
+            output=output if output is not None else sys.stdout,
+        )
+    elif args.command == "group" and args.group_command == "show":
+        _run_group_show(args.group, output=output if output is not None else sys.stdout)
+    elif args.command == "group" and args.group_command == "list":
+        _run_group_list(output=output if output is not None else sys.stdout)
+    elif args.command == "group" and args.group_command == "remove":
+        _run_group_remove(
+            args.group,
+            notifier=ServiceReloadNotifier() if notifier is None else notifier,
+            output=output if output is not None else sys.stdout,
+        )
+    elif args.command == "group" and args.group_command == "member":
+        _run_group_membership(
+            args.group,
+            args.username,
+            add=args.member_command == "add",
             notifier=ServiceReloadNotifier() if notifier is None else notifier,
             output=output if output is not None else sys.stdout,
         )

@@ -184,6 +184,9 @@ def test_identity_store_contract_accepts_non_sqlite_implementation() -> None:
         def list_groups(self) -> tuple[str, ...]:
             raise AssertionError("fixture should not use administration methods")
 
+        def get_group_members(self, name: str) -> tuple[str, ...]:
+            raise AssertionError("fixture should not use administration methods")
+
         def remove_group(self, name: str) -> None:
             raise AssertionError("fixture should not use administration methods")
 
