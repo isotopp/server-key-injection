@@ -46,6 +46,10 @@ or credential material.
 - Check free space and ownership on `/home/ski/var/lib/ski`, `/home/ski/etc`,
   and `/home/ski/etc/keys`. The service account needs only the access granted by the
   reviewed unit.
+- State and CA files must remain regular, non-symlink files owned by `ski:ski`
+  without group or other write permission. An unsafe database, lock, or CA
+  file causes a fail-closed startup or administrative command; stop the service
+  before correcting ownership or mode and then verify a fresh readiness event.
 - Review user and group membership changes:
 
   ```console

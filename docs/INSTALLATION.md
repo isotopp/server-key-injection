@@ -81,6 +81,18 @@ trust this CA. Never copy the private CA key to a production host, commit it,
 or place it in a unit file. The current demo creates an empty KRL file; KRL
 revocation workflows are part of a later epic.
 
+### File safety contract
+
+At every state or CA file boundary, `ski` accepts only regular files that are
+not symlinks, are owned by the service account and group, and do not grant
+write permission to the group or to other users. This applies to the SQLite
+database and its ownership lock, and to the CA private key, public key, and
+KRL created by `ski ca init`. The service and administrative commands fail
+closed with a generic error when an existing file violates this contract;
+`ca init` also removes newly installed material if post-install validation
+fails. Keep the configured paths as direct files below the service account's
+0700 home rather than replacing them with symlinks.
+
 ## Create the first user and group
 
 Create a user. The command prompts for a password and prints the TOTP secret
