@@ -69,20 +69,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         help="TCP port to listen on",
     )
+    serve.set_defaults(handler=_handle_serve)
     user = commands.add_parser("user", help="administer demo identities")
     user_commands = user.add_subparsers(dest="user_command", required=True)
     user_add = user_commands.add_parser("add", help="enroll a demo user")
     user_add.add_argument("username")
-    user_commands.add_parser("list", help="list demo users")
+    user_add.set_defaults(handler=_handle_user_add)
+    user_list = user_commands.add_parser("list", help="list demo users")
+    user_list.set_defaults(handler=_handle_user_list)
     user_show = user_commands.add_parser("show", help="show one demo user")
     user_show.add_argument("username")
+    user_show.set_defaults(handler=_handle_user_show)
     for status in ("enable", "disable"):
         status_parser = user_commands.add_parser(status, help=f"{status} a demo user")
         status_parser.add_argument("username")
+        status_parser.set_defaults(handler=_handle_user_status)
     password = user_commands.add_parser("password", help="manage a user password")
     password_commands = password.add_subparsers(dest="password_command", required=True)
     password_set = password_commands.add_parser("set", help="replace a password")
     password_set.add_argument("username")
+    password_set.set_defaults(handler=_handle_user_password_set)
     totp = user_commands.add_parser("totp", help="manage a user TOTP secret")
     totp_commands = totp.add_subparsers(dest="totp_command", required=True)
     totp_regenerate = totp_commands.add_parser(
@@ -90,15 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="replace a TOTP secret",
     )
     totp_regenerate.add_argument("username")
+    totp_regenerate.set_defaults(handler=_handle_user_totp_regenerate)
     group = commands.add_parser("group", help="administer demo groups")
     group_commands = group.add_subparsers(dest="group_command", required=True)
     group_add = group_commands.add_parser("add", help="create a demo group")
     group_add.add_argument("group")
+    group_add.set_defaults(handler=_handle_group_add)
     group_remove = group_commands.add_parser("remove", help="remove an empty group")
     group_remove.add_argument("group")
+    group_remove.set_defaults(handler=_handle_group_remove)
     group_show = group_commands.add_parser("show", help="show group members")
     group_show.add_argument("group")
-    group_commands.add_parser("list", help="list demo groups")
+    group_show.set_defaults(handler=_handle_group_show)
+    group_list = group_commands.add_parser("list", help="list demo groups")
+    group_list.set_defaults(handler=_handle_group_list)
     member = group_commands.add_parser("member", help="manage group membership")
     member_commands = member.add_subparsers(dest="member_command", required=True)
     for member_action in ("add", "remove"):
@@ -108,16 +119,19 @@ def build_parser() -> argparse.ArgumentParser:
         )
         member_parser.add_argument("group")
         member_parser.add_argument("username")
+        member_parser.set_defaults(handler=_handle_group_membership)
 
     ca = commands.add_parser("ca", help="manage the persistent user CA")
     ca_commands = ca.add_subparsers(dest="ca_command", required=True)
-    ca_commands.add_parser("init", help="initialize the Ed25519 user CA")
+    ca_init = ca_commands.add_parser("init", help="initialize the Ed25519 user CA")
+    ca_init.set_defaults(handler=_handle_ca_init)
     ca_show = ca_commands.add_parser("show", help="show public CA status")
     ca_show.add_argument(
         "--all",
         action="store_true",
         help="show all known CA records",
     )
+    ca_show.set_defaults(handler=_handle_ca_show)
     ca_public_key = ca_commands.add_parser(
         "public-key",
         help="print a public CA key",
@@ -126,6 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fingerprint",
         help="select a CA by fingerprint",
     )
+    ca_public_key.set_defaults(handler=_handle_ca_public_key)
     ca_log = ca_commands.add_parser("log", help="inspect CA events")
     log_commands = ca_log.add_subparsers(dest="log_command", required=True)
     log_list = log_commands.add_parser("list", help="list redacted CA events")
@@ -134,7 +149,11 @@ def build_parser() -> argparse.ArgumentParser:
     log_list.add_argument("--event")
     log_list.add_argument("--from", dest="from_time")
     log_list.add_argument("--to", dest="to_time")
-    log_commands.add_parser("verify", help="verify CA state consistency")
+    log_list.set_defaults(handler=_handle_ca_log_list)
+    ca_log_verify = log_commands.add_parser(
+        "verify", help="verify CA state consistency"
+    )
+    ca_log_verify.set_defaults(handler=_handle_ca_log_verify)
     return parser
 
 
@@ -532,6 +551,194 @@ def _run_group_membership(
         database.close()
 
 
+def _handle_serve(args: argparse.Namespace, **kwargs: object) -> None:
+    """Run the foreground service selected by the serve parser."""
+    del kwargs
+    asyncio.run(serve_foreground(bind=args.bind, port=args.port))
+
+
+def _handle_user_add(
+    args: argparse.Namespace,
+    *,
+    secret_reader,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    _run_user_add(
+        args.username,
+        secret_reader=secret_reader,
+        notifier=notifier,
+        output=output,
+    )
+
+
+def _handle_user_show(
+    args: argparse.Namespace, *, output: TextIO, **kwargs: object
+) -> None:
+    del kwargs
+    _run_user_show(args.username, output=output)
+
+
+def _handle_user_list(
+    args: argparse.Namespace, *, output: TextIO, **kwargs: object
+) -> None:
+    del args, kwargs
+    _run_user_list(output=output)
+
+
+def _handle_user_status(
+    args: argparse.Namespace,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_user_status(
+        args.username,
+        enabled=args.user_command == "enable",
+        notifier=notifier,
+        output=output,
+    )
+
+
+def _handle_user_password_set(
+    args: argparse.Namespace,
+    *,
+    secret_reader,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    _run_user_password_set(
+        args.username,
+        secret_reader=secret_reader,
+        notifier=notifier,
+        output=output,
+    )
+
+
+def _handle_user_totp_regenerate(
+    args: argparse.Namespace,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_user_totp_regenerate(args.username, notifier=notifier, output=output)
+
+
+def _handle_group_add(
+    args: argparse.Namespace,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_group_add(args.group, notifier=notifier, output=output)
+
+
+def _handle_group_show(
+    args: argparse.Namespace, *, output: TextIO, **kwargs: object
+) -> None:
+    del kwargs
+    _run_group_show(args.group, output=output)
+
+
+def _handle_group_list(
+    args: argparse.Namespace, *, output: TextIO, **kwargs: object
+) -> None:
+    del args, kwargs
+    _run_group_list(output=output)
+
+
+def _handle_group_remove(
+    args: argparse.Namespace,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_group_remove(args.group, notifier=notifier, output=output)
+
+
+def _handle_group_membership(
+    args: argparse.Namespace,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_group_membership(
+        args.group,
+        args.username,
+        add=args.member_command == "add",
+        notifier=notifier,
+        output=output,
+    )
+
+
+def _handle_ca_init(
+    args: argparse.Namespace,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del args, kwargs
+    _run_ca_init(notifier=notifier, output=output)
+
+
+def _handle_ca_show(
+    args: argparse.Namespace,
+    *,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_ca_show(show_all=args.all, output=output)
+
+
+def _handle_ca_public_key(
+    args: argparse.Namespace,
+    *,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_ca_public_key(fingerprint=args.fingerprint, output=output)
+
+
+def _handle_ca_log_list(
+    args: argparse.Namespace,
+    *,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del kwargs
+    _run_ca_log_list(
+        serial=args.serial,
+        user=args.user,
+        event=args.event,
+        from_time=args.from_time,
+        to_time=args.to_time,
+        output=output,
+    )
+
+
+def _handle_ca_log_verify(
+    args: argparse.Namespace,
+    *,
+    output: TextIO,
+    **kwargs: object,
+) -> None:
+    del args, kwargs
+    _run_ca_log_verify(output=output)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -541,107 +748,22 @@ def main(
 ) -> None:
     """Run the command-line entry point."""
     args = build_parser().parse_args(argv)
-    if args.command == "serve":
-        try:
-            asyncio.run(serve_foreground(bind=args.bind, port=args.port))
-        except KeyboardInterrupt:
-            return
-    elif args.command == "user" and args.user_command == "add":
-        _run_user_add(
-            args.username,
-            secret_reader=getpass.getpass if secret_reader is None else secret_reader,
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
+    handler = getattr(args, "handler", None)
+    if handler is None:
+        if args.command == "ca":
+            raise SystemExit("ski: this CA command is not implemented yet")
+        return
+    effective_secret_reader = (
+        getpass.getpass if secret_reader is None else secret_reader
+    )
+    effective_notifier = ServiceReloadNotifier() if notifier is None else notifier
+    effective_output = output if output is not None else sys.stdout
+    try:
+        handler(
+            args,
+            secret_reader=effective_secret_reader,
+            notifier=effective_notifier,
+            output=effective_output,
         )
-    elif args.command == "user" and args.user_command == "show":
-        _run_user_show(
-            args.username, output=output if output is not None else sys.stdout
-        )
-    elif args.command == "user" and args.user_command == "list":
-        _run_user_list(output=output if output is not None else sys.stdout)
-    elif args.command == "user" and args.user_command in {"enable", "disable"}:
-        _run_user_status(
-            args.username,
-            enabled=args.user_command == "enable",
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
-        )
-    elif (
-        args.command == "user"
-        and args.user_command == "password"
-        and args.password_command == "set"
-    ):
-        _run_user_password_set(
-            args.username,
-            secret_reader=getpass.getpass if secret_reader is None else secret_reader,
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
-        )
-    elif args.command == "group" and args.group_command == "add":
-        _run_group_add(
-            args.group,
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
-        )
-    elif args.command == "group" and args.group_command == "show":
-        _run_group_show(args.group, output=output if output is not None else sys.stdout)
-    elif args.command == "group" and args.group_command == "list":
-        _run_group_list(output=output if output is not None else sys.stdout)
-    elif args.command == "group" and args.group_command == "remove":
-        _run_group_remove(
-            args.group,
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
-        )
-    elif args.command == "group" and args.group_command == "member":
-        _run_group_membership(
-            args.group,
-            args.username,
-            add=args.member_command == "add",
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
-        )
-    elif (
-        args.command == "user"
-        and args.user_command == "totp"
-        and args.totp_command == "regenerate"
-    ):
-        _run_user_totp_regenerate(
-            args.username,
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
-        )
-    elif args.command == "ca" and args.ca_command == "init":
-        _run_ca_init(
-            notifier=ServiceReloadNotifier() if notifier is None else notifier,
-            output=output if output is not None else sys.stdout,
-        )
-    elif args.command == "ca" and args.ca_command == "show":
-        _run_ca_show(
-            show_all=args.all,
-            output=output if output is not None else sys.stdout,
-        )
-    elif args.command == "ca" and args.ca_command == "public-key":
-        _run_ca_public_key(
-            fingerprint=args.fingerprint,
-            output=output if output is not None else sys.stdout,
-        )
-    elif (
-        args.command == "ca" and args.ca_command == "log" and args.log_command == "list"
-    ):
-        _run_ca_log_list(
-            serial=args.serial,
-            user=args.user,
-            event=args.event,
-            from_time=args.from_time,
-            to_time=args.to_time,
-            output=output if output is not None else sys.stdout,
-        )
-    elif (
-        args.command == "ca"
-        and args.ca_command == "log"
-        and args.log_command == "verify"
-    ):
-        _run_ca_log_verify(output=output if output is not None else sys.stdout)
-    elif args.command == "ca":
-        raise SystemExit("ski: this CA command is not implemented yet")
+    except KeyboardInterrupt:
+        return
