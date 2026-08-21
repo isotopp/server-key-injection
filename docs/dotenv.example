@@ -1,0 +1,26 @@
+# Example configuration for ski.
+#
+# Copy this file to .env for a local checkout, or adapt it as
+# /etc/ski/env for a systemd deployment. The application searches, in order:
+#   ./.env
+#   $HOME/.ski.env
+#   /etc/ski/env
+# and stops at the first existing file. Exported environment variables take
+# precedence over values in the selected file.
+
+# Required by the current daemon. The parent directory must already exist and
+# be writable by the account running ski. The Epic 2 tracer creates only its
+# foundational SQLite schema here; it does not create persistent CA material.
+SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
+
+# Persistent CA and certificate settings for later epics. These are documented
+# here so deployment configuration can be prepared, but the current test tracer
+# does not read or require them.
+# SKI_CA_PRIVATE_KEY=/etc/ski/keys/user_ca
+# SKI_CA_PUBLIC_KEY=/etc/ski/keys/user_ca.pub
+# SKI_CA_KRL=/var/lib/ski/revoked.krl
+# SKI_CERTIFICATE_LIFETIME=25h
+
+# Bind address and port are command-line options, not environment settings:
+#   uv run ski serve --bind 127.0.0.1 --port 2222
+# The public defaults are --bind * (both IPv4 and IPv6) and --port 22.

@@ -20,6 +20,9 @@ dist/
 .env.*
 !.env.example
 
+# Local SQLite state and its journal/lock sidecars
+*.sqlite3*
+
 # Editors and operating systems
 .idea/
 .vscode/
