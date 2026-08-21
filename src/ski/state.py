@@ -653,9 +653,26 @@ class StateDatabase:
             serial=serial,
         )
 
-    def list_events(self) -> tuple[EventRecord, ...]:
+    def list_events(
+        self,
+        *,
+        serial: int | None = None,
+        identity: str | None = None,
+        kind: str | None = None,
+        from_time: int | None = None,
+        to_time: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[EventRecord, ...]:
         """Return validated append-only events in stable insertion order."""
-        rows = event_rows(self)
+        rows = event_rows(
+            self,
+            serial=serial,
+            identity=identity,
+            kind=kind,
+            from_time=from_time,
+            to_time=to_time,
+            limit=limit,
+        )
         return tuple(self._event_record_from_row(row) for row in rows)
 
     def verify_ca_state(self) -> None:
@@ -676,27 +693,33 @@ class StateDatabase:
             for record in certificates
         }
         events = self.list_events()
+        certificate_index = {(record.ca_id, record.serial) for record in certificates}
+        issued_event_index = {
+            (event.ca_id, event.serial, event.request_id, event.identity)
+            for event in events
+            if event.kind == "certificate_issued" and event.decision == "allow"
+        }
         for event in events:
             if event.ca_id is not None and event.ca_id not in ca_ids:
                 raise StateError("event references an unknown CA")
             if event.serial is not None:
-                if event.ca_id is None or not any(
-                    certificate.ca_id == event.ca_id
-                    and certificate.serial == event.serial
-                    for certificate in certificates
+                if (
+                    event.ca_id is None
+                    or (event.ca_id, event.serial) not in certificate_index
                 ):
                     raise StateError("event references an unknown certificate")
         for certificate in certificates:
             if certificate.ca_id not in ca_ids:
                 raise StateError("certificate references an unknown CA")
-            if certificate.outcome == "success" and not any(
-                event.kind == "certificate_issued"
-                and event.decision == "allow"
-                and event.ca_id == certificate.ca_id
-                and event.serial == certificate.serial
-                and event.request_id == certificate.request_id
-                and event.identity == certificate.identity
-                for event in events
+            if (
+                certificate.outcome == "success"
+                and (
+                    certificate.ca_id,
+                    certificate.serial,
+                    certificate.request_id,
+                    certificate.identity,
+                )
+                not in issued_event_index
             ):
                 raise StateError("certificate success event is missing")
         if len(certificate_keys) != len(certificates):

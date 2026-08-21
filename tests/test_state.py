@@ -228,6 +228,30 @@ def test_state_database_appends_redacted_events_without_update_or_delete(
         database.close()
 
 
+def test_state_database_bounds_event_queries_at_the_persistence_boundary(
+    tmp_path: Path,
+) -> None:
+    """A bounded event request returns only the requested stable prefix."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        for index in range(3):
+            database.record_event(
+                kind="certificate_issued",
+                decision="allow",
+                request_id=f"request-{index}",
+                occurred_at=1_700_000_000 + index,
+                identity="alice",
+            )
+        bounded = database.list_events(identity="alice", limit=2)
+        assert len(bounded) == 2
+        assert [event.request_id for event in bounded] == [
+            "request-0",
+            "request-1",
+        ]
+    finally:
+        database.close()
+
+
 def test_state_database_fails_closed_on_corrupt_persisted_ca_record(
     tmp_path: Path,
 ) -> None:

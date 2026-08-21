@@ -323,17 +323,15 @@ def _run_ca_log_list(
             raise ValueError("time filter range is malformed")
         configuration = _ca_configuration()
         database = StateDatabase.open(configuration.database)
-        events = database.list_events()
-        filtered = [
-            record
-            for record in events
-            if (serial_value is None or record.serial == serial_value)
-            and (user is None or record.identity == user)
-            and (event is None or record.kind == event)
-            and (from_value is None or record.occurred_at >= from_value)
-            and (to_value is None or record.occurred_at <= to_value)
-        ]
-        for record in filtered[:100]:
+        events = database.list_events(
+            serial=serial_value,
+            identity=user,
+            kind=event,
+            from_time=from_value,
+            to_time=to_value,
+            limit=100,
+        )
+        for record in events:
             print(_render_event(record), file=output)
     except (ConfigurationError, StateError, ValueError) as exc:
         raise SystemExit("ski: unable to list CA log") from exc

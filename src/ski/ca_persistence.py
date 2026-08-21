@@ -134,12 +134,43 @@ def insert_event(database: Any, values: Mapping[str, Any]) -> int | None:
         return cursor.lastrowid
 
 
-def event_rows(database: Any) -> list[tuple[Any, ...]]:
+def event_rows(
+    database: Any,
+    *,
+    serial: int | None = None,
+    identity: str | None = None,
+    kind: str | None = None,
+    from_time: int | None = None,
+    to_time: int | None = None,
+    limit: int | None = None,
+) -> list[tuple[Any, ...]]:
+    clauses: list[str] = []
+    parameters: list[Any] = []
+    if serial is not None:
+        clauses.append("serial = ?")
+        parameters.append(str(serial))
+    if identity is not None:
+        clauses.append("identity = ?")
+        parameters.append(identity)
+    if kind is not None:
+        clauses.append("kind = ?")
+        parameters.append(kind)
+    if from_time is not None:
+        clauses.append("occurred_at >= ?")
+        parameters.append(from_time)
+    if to_time is not None:
+        clauses.append("occurred_at <= ?")
+        parameters.append(to_time)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    limit_clause = " LIMIT ?" if limit is not None else ""
+    if limit is not None:
+        parameters.append(limit)
     with database.read_connection() as connection:
         return [
             tuple(row)
             for row in connection.execute(
                 "SELECT event_id, occurred_at, kind, decision, request_id, identity, "
-                "ca_id, serial FROM events ORDER BY event_id",
+                f"ca_id, serial FROM events{where} ORDER BY event_id{limit_clause}",
+                parameters,
             ).fetchall()
         ]
