@@ -1,0 +1,164 @@
+"""Local SQLite state and service-instance ownership."""
+
+from __future__ import annotations
+
+import fcntl
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TextIO
+
+SUPPORTED_SCHEMA_VERSION = 1
+
+
+class StateError(RuntimeError):
+    """Base error for local service state failures."""
+
+
+class StateOwnershipError(StateError):
+    """Raised when another daemon owns the configured state database."""
+
+
+class UnsupportedSchemaError(StateError):
+    """Raised when a database requires a newer schema than this service knows."""
+
+
+class StateDatabase:
+    """Own a SQLite connection and optionally the daemon instance lock."""
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        connection: sqlite3.Connection,
+        lock_file: TextIO | None,
+    ) -> None:
+        self.path = path
+        self._connection = connection
+        self._lock_file = lock_file
+
+    @classmethod
+    def open(cls, path: Path, *, owner: bool = False) -> StateDatabase:
+        """Open foundational state, optionally acquiring daemon ownership."""
+        path = Path(path).expanduser()
+        if not path.parent.is_dir():
+            raise StateError("state database parent directory is unavailable")
+        if owner:
+            lock_file = cls._acquire_lock(path)
+        else:
+            lock_file = None
+
+        connection: sqlite3.Connection | None = None
+        try:
+            existed = path.exists()
+            if not existed:
+                path.touch(mode=0o600)
+            path.chmod(0o600)
+            connection = sqlite3.connect(path, timeout=5.0, isolation_level=None)
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            cls._initialize_schema(connection)
+        except Exception:
+            if connection is not None:
+                connection.close()
+            if lock_file is not None:
+                cls._release_lock(lock_file)
+            raise
+        assert connection is not None
+        return cls(path=path, connection=connection, lock_file=lock_file)
+
+    @staticmethod
+    def _acquire_lock(path: Path) -> TextIO:
+        lock_path = path.with_name(f"{path.name}.lock")
+        lock_path.touch(mode=0o600, exist_ok=True)
+        lock_path.chmod(0o600)
+        lock_file = lock_path.open("r+")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            lock_file.close()
+            raise StateOwnershipError("state database is already owned") from exc
+        return lock_file
+
+    @staticmethod
+    def _release_lock(lock_file: TextIO) -> None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+    @staticmethod
+    def _initialize_schema(connection: sqlite3.Connection) -> None:
+        schema_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ski_schema'",
+        ).fetchone()
+        row = (
+            connection.execute(
+                "SELECT version FROM ski_schema WHERE singleton = 1",
+            ).fetchone()
+            if schema_exists
+            else None
+        )
+        if row is not None:
+            if row[0] > SUPPORTED_SCHEMA_VERSION:
+                raise UnsupportedSchemaError("state database schema is newer")
+            if row[0] != SUPPORTED_SCHEMA_VERSION:
+                raise StateError("state database schema version is unsupported")
+            return
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS ski_schema ("
+                "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+                "version INTEGER NOT NULL"
+                ")",
+            )
+            connection.execute(
+                "INSERT INTO ski_schema (singleton, version) VALUES (1, ?)",
+                (SUPPORTED_SCHEMA_VERSION,),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @property
+    def schema_version(self) -> int:
+        """Return the supported schema version in this database."""
+        row = self._connection.execute(
+            "SELECT version FROM ski_schema WHERE singleton = 1",
+        ).fetchone()
+        if row is None:
+            raise StateError("state schema is not initialized")
+        return int(row[0])
+
+    @property
+    def table_names(self) -> frozenset[str]:
+        """Return application table names for operational inspection."""
+        rows = self._connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )
+        return frozenset(row[0] for row in rows)
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Run one explicit short transaction which commits or rolls back."""
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield self._connection
+        except Exception:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+
+    def close(self) -> None:
+        """Close the database and release daemon ownership idempotently."""
+        connection = self._connection
+        self._connection = sqlite3.Connection(":memory:")
+        connection.close()
+        if self._lock_file is not None:
+            lock_file = self._lock_file
+            self._lock_file = None
+            self._release_lock(lock_file)
