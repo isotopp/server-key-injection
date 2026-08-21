@@ -83,10 +83,16 @@ class TracerIssuer:
         port: int = 22,
         request_handler: TracerRequestHandler | None = None,
         listener_factory: ListenerFactory | None = None,
+        server_host_key: asyncssh.SSHKey | None = None,
     ) -> None:
         self.bind = bind
         self.requested_port = port
         self.request_handler = request_handler
+        self._server_host_key = (
+            asyncssh.generate_private_key("ssh-ed25519")
+            if server_host_key is None
+            else server_host_key
+        )
         self._listener_factory = (
             asyncssh.listen if listener_factory is None else listener_factory
         )
@@ -109,11 +115,10 @@ class TracerIssuer:
         return self._acceptors[0].get_port()
 
     async def start(self) -> None:
-        """Start the listener with a process-local ephemeral host key."""
+        """Start the listener with the configured host key."""
         if self._acceptors:
             raise RuntimeError("test issuer is already running")
 
-        host_key = asyncssh.generate_private_key("ssh-ed25519")
         hosts = ("0.0.0.0", "::") if self.bind == "*" else (self.bind,)
 
         def server_factory() -> _TracerSSHServer:
@@ -127,7 +132,7 @@ class TracerIssuer:
                     host,
                     port,
                     server_factory=server_factory,
-                    server_host_keys=[host_key],
+                    server_host_keys=[self._server_host_key],
                     agent_forwarding=True,
                 )
                 opened.append(acceptor)

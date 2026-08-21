@@ -8,7 +8,33 @@ from pathlib import Path
 
 import pytest
 
-from ski.state import StateDatabase, StateOwnershipError, UnsupportedSchemaError
+from ski.state import (
+    StateDatabase,
+    StateError,
+    StateOwnershipError,
+    UnsupportedSchemaError,
+)
+
+
+def test_state_database_persists_one_issuer_host_identity(tmp_path: Path) -> None:
+    """A database owns one stable Ed25519 host identity across reopenings."""
+    database_path = tmp_path / "state.sqlite3"
+
+    first = StateDatabase.open(database_path, owner=True)
+    try:
+        first_key = first.host_key
+        assert first_key.algorithm == "ssh-ed25519"
+        assert first_key.fingerprint.startswith("SHA256:")
+        assert "ssh_host_keys" in first.table_names
+    finally:
+        first.close()
+
+    second = StateDatabase.open(database_path, owner=True)
+    try:
+        assert second.host_key.fingerprint == first_key.fingerprint
+        assert second.host_key.public_key == first_key.public_key
+    finally:
+        second.close()
 
 
 def test_state_database_creates_only_foundational_schema(tmp_path: Path) -> None:
@@ -25,8 +51,9 @@ def test_state_database_creates_only_foundational_schema(tmp_path: Path) -> None
             )
             == 0o600
         )
-        assert database.schema_version == 1
+        assert database.schema_version == 2
         assert "ski_schema" in database.table_names
+        assert "ssh_host_keys" in database.table_names
         assert "ca_keys" not in database.table_names
         assert "certificates" not in database.table_names
     finally:
@@ -41,9 +68,66 @@ def test_state_database_reopens_idempotently(tmp_path: Path) -> None:
     first.close()
     second = StateDatabase.open(database_path, owner=True)
     try:
-        assert second.schema_version == 1
+        assert second.schema_version == 2
     finally:
         second.close()
+
+
+def test_state_database_migrates_foundation_to_host_key_schema(
+    tmp_path: Path,
+) -> None:
+    """An Epic 2 database gains host-key state without losing its foundation."""
+    database_path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE ski_schema ("
+        "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+        "version INTEGER NOT NULL"
+        ")",
+    )
+    connection.execute("INSERT INTO ski_schema VALUES (1, 1)")
+    connection.commit()
+    connection.close()
+
+    database = StateDatabase.open(database_path, owner=True)
+    try:
+        assert database.schema_version == 2
+        assert "ssh_host_keys" in database.table_names
+        assert database.host_key.fingerprint.startswith("SHA256:")
+    finally:
+        database.close()
+
+
+def test_state_database_rejects_tampered_host_identity_without_regeneration(
+    tmp_path: Path,
+) -> None:
+    """Corrupt host-key material fails closed and is never silently replaced."""
+    database_path = tmp_path / "state.sqlite3"
+    database = StateDatabase.open(database_path, owner=True)
+    try:
+        _ = database.host_key
+    finally:
+        database.close()
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE ssh_host_keys SET algorithm = 'ssh-rsa' WHERE singleton = 1",
+    )
+    connection.commit()
+    connection.close()
+
+    database = StateDatabase.open(database_path, owner=True)
+    try:
+        with pytest.raises(StateError, match="algorithm is unsupported"):
+            _ = database.host_key
+    finally:
+        database.close()
+
+    connection = sqlite3.connect(database_path)
+    assert connection.execute(
+        "SELECT algorithm FROM ssh_host_keys WHERE singleton = 1",
+    ).fetchone() == ("ssh-rsa",)
+    connection.close()
 
 
 def test_newer_state_schema_fails_closed(tmp_path: Path) -> None:

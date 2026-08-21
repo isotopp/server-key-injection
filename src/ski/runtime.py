@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
+import asyncssh
+
 from ski.configuration import (
     ConfigurationError,
     RuntimeConfiguration,
@@ -107,12 +109,14 @@ class ServiceRuntime:
                 allow_ephemeral_port=self.port == 0,
             )
             state = self._state_opener(configuration.database, owner=True)
+            self._state = state
+            host_key = asyncssh.import_private_key(state.host_key.private_key)
             issuer = self._issuer_factory(
                 bind=configuration.bind,
                 port=configuration.port,
                 request_handler=self._handle_tracer_request,
+                server_host_key=host_key,
             )
-            self._state = state
             self._issuer = issuer
             await issuer.start()
             self._configuration = configuration

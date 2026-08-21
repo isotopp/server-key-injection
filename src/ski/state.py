@@ -6,10 +6,23 @@ import fcntl
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
-SUPPORTED_SCHEMA_VERSION = 1
+import asyncssh
+
+SUPPORTED_SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class HostKeyMaterial:
+    """Validated Ed25519 material owned by the local state database."""
+
+    algorithm: str
+    private_key: bytes = field(repr=False)
+    public_key: bytes
+    fingerprint: str
 
 
 class StateError(RuntimeError):
@@ -37,6 +50,7 @@ class StateDatabase:
         self.path = path
         self._connection = connection
         self._lock_file = lock_file
+        self._host_key: HostKeyMaterial | None = None
 
     @classmethod
     def open(cls, path: Path, *, owner: bool = False) -> StateDatabase:
@@ -101,6 +115,19 @@ class StateDatabase:
         if row is not None:
             if row[0] > SUPPORTED_SCHEMA_VERSION:
                 raise UnsupportedSchemaError("state database schema is newer")
+            if row[0] == 1:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    StateDatabase._create_host_key_table(connection)
+                    connection.execute(
+                        "UPDATE ski_schema SET version = ? WHERE singleton = 1",
+                        (SUPPORTED_SCHEMA_VERSION,),
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                return
             if row[0] != SUPPORTED_SCHEMA_VERSION:
                 raise StateError("state database schema version is unsupported")
             return
@@ -117,10 +144,91 @@ class StateDatabase:
                 "INSERT INTO ski_schema (singleton, version) VALUES (1, ?)",
                 (SUPPORTED_SCHEMA_VERSION,),
             )
+            StateDatabase._create_host_key_table(connection)
             connection.commit()
         except Exception:
             connection.rollback()
             raise
+
+    @staticmethod
+    def _create_host_key_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS ssh_host_keys ("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+            "algorithm TEXT NOT NULL, "
+            "private_key BLOB NOT NULL, "
+            "public_key BLOB NOT NULL, "
+            "fingerprint TEXT NOT NULL"
+            ")",
+        )
+
+    @property
+    def host_key(self) -> HostKeyMaterial:
+        """Return the validated persistent Ed25519 SSH host identity."""
+        if self._host_key is not None:
+            return self._host_key
+
+        row = self._connection.execute(
+            "SELECT algorithm, private_key, public_key, fingerprint "
+            "FROM ssh_host_keys WHERE singleton = 1",
+        ).fetchone()
+        if row is None:
+            material = self._new_host_key()
+            with self.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO ssh_host_keys "
+                    "(singleton, algorithm, private_key, public_key, fingerprint) "
+                    "VALUES (1, ?, ?, ?, ?)",
+                    (
+                        material.algorithm,
+                        material.private_key,
+                        material.public_key,
+                        material.fingerprint,
+                    ),
+                )
+            self._host_key = material
+            return material
+
+        material = self._validate_host_key_row(row)
+        self._host_key = material
+        return material
+
+    @staticmethod
+    def _new_host_key() -> HostKeyMaterial:
+        key = asyncssh.generate_private_key("ssh-ed25519")
+        return HostKeyMaterial(
+            algorithm="ssh-ed25519",
+            private_key=key.export_private_key(),
+            public_key=key.export_public_key(),
+            fingerprint=key.get_fingerprint(),
+        )
+
+    @staticmethod
+    def _validate_host_key_row(row: tuple[object, ...]) -> HostKeyMaterial:
+        algorithm, private_key, public_key, fingerprint = row
+        if algorithm != "ssh-ed25519":
+            raise StateError("stored SSH host key algorithm is unsupported")
+        if not all(
+            isinstance(value, (bytes, bytearray)) for value in (private_key, public_key)
+        ) or not isinstance(fingerprint, str):
+            raise StateError("stored SSH host key is malformed")
+        algorithm_value = cast(str, algorithm)
+        private_bytes = bytes(cast(bytes | bytearray, private_key))
+        public_bytes = bytes(cast(bytes | bytearray, public_key))
+        try:
+            key = asyncssh.import_private_key(private_bytes)
+        except Exception as exc:
+            raise StateError("stored SSH host key is invalid") from exc
+        if key.export_public_key() != public_bytes:
+            raise StateError("stored SSH host key public data does not match")
+        if key.get_fingerprint() != fingerprint:
+            raise StateError("stored SSH host key fingerprint does not match")
+        return HostKeyMaterial(
+            algorithm=algorithm_value,
+            private_key=private_bytes,
+            public_key=public_bytes,
+            fingerprint=fingerprint,
+        )
 
     @property
     def schema_version(self) -> int:

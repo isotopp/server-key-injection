@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from typing import cast
 
+import asyncssh
 import pytest
 
 from ski.journal import MemoryEventSink
 from ski.runtime import IssuerFactory, ServiceRuntime, StateOpener
-from ski.state import StateDatabase
+from ski.state import StateDatabase, StateError
 
 
 def test_service_runtime_starts_state_and_listener_before_ready_event(
@@ -28,13 +30,83 @@ def test_service_runtime_starts_state_and_listener_before_ready_event(
         )
         await runtime.start()
         try:
-            assert runtime.state.schema_version == 1
+            assert runtime.state.schema_version == 2
             assert runtime.issuer.port > 0
             ready = sink.events[-1]
             assert ready.name == "service_ready"
             assert ready.fields["SKI_PORT"] == str(runtime.issuer.port)
         finally:
             await runtime.close()
+
+    asyncio.run(exercise())
+
+
+def test_runtime_reuses_the_database_host_key_after_restart(tmp_path: Path) -> None:
+    """The real SSH listener presents the database-owned host key."""
+    database_path = tmp_path / "state.sqlite3"
+
+    async def fingerprint() -> str:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            event_sink=MemoryEventSink(),
+        )
+        await runtime.start()
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1",
+                port=runtime.issuer.port,
+                username="test-user",
+                known_hosts=None,
+            ) as connection:
+                server_host_key = connection.get_server_host_key()
+                assert server_host_key is not None
+                return server_host_key.get_fingerprint()
+        finally:
+            await runtime.close()
+
+    async def exercise() -> None:
+        assert await fingerprint() == await fingerprint()
+
+    asyncio.run(exercise())
+
+
+def test_runtime_rejects_corrupt_host_identity_before_listener_start(
+    tmp_path: Path,
+) -> None:
+    """A corrupt persisted host key prevents listening and releases ownership."""
+    database_path = tmp_path / "state.sqlite3"
+    database = StateDatabase.open(database_path, owner=True)
+    try:
+        _ = database.host_key
+    finally:
+        database.close()
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE ssh_host_keys SET private_key = ? WHERE singleton = 1",
+        (b"not-a-private-key",),
+    )
+    connection.commit()
+    connection.close()
+
+    async def exercise() -> None:
+        sink = MemoryEventSink()
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            event_sink=sink,
+        )
+        with pytest.raises(StateError, match="host key is invalid"):
+            await runtime.start()
+        with pytest.raises(RuntimeError, match="not started"):
+            runtime.issuer
+        assert sink.events[-1].name == "service_start_failed"
+
+        reopened = StateDatabase.open(database_path, owner=True)
+        reopened.close()
 
     asyncio.run(exercise())
 
