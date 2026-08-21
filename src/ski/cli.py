@@ -6,9 +6,7 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from ski.environment import load_environment
-from ski.injection import TracerAgentInjector
-from ski.server import TracerIssuer
+from ski.runtime import ServiceRuntime
 
 
 def _port(value: str) -> int:
@@ -49,23 +47,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def serve_foreground(*, bind: str, port: int) -> None:
-    """Run the tracer issuer and report its bound address."""
-    issuer = TracerIssuer(
+    """Run the configured foreground service."""
+    runtime = ServiceRuntime(
         bind=bind,
         port=port,
-        request_handler=TracerAgentInjector().handle,
     )
-    await issuer.start()
-    print(f"ski listening on {issuer.addresses}", flush=True)
+    await runtime.start()
     try:
         await asyncio.Event().wait()
     finally:
-        await issuer.close()
+        await runtime.close()
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the command-line entry point."""
-    load_environment()
     args = build_parser().parse_args(argv)
     if args.command == "serve":
         try:

@@ -39,8 +39,9 @@ def _validate_bind(bind: str) -> str:
     return bind
 
 
-def _validate_port(port: int) -> int:
-    if not 1 <= port <= 65535:
+def _validate_port(port: int, *, allow_ephemeral: bool = False) -> int:
+    minimum = 0 if allow_ephemeral else 1
+    if not minimum <= port <= 65535:
         raise ConfigurationError("SKI_PORT must be between 1 and 65535")
     return port
 
@@ -67,6 +68,7 @@ def load_runtime_configuration(
     directory: Path | None = None,
     home_directory: Path | None = None,
     system_file: Path = SYSTEM_ENVIRONMENT_FILE,
+    allow_ephemeral_port: bool = False,
 ) -> RuntimeConfiguration:
     """Load and validate one service configuration without side effects."""
     exported = dict(
@@ -89,7 +91,7 @@ def load_runtime_configuration(
     values.update(exported)
 
     validated_bind = _validate_bind(bind)
-    validated_port = _validate_port(port)
+    validated_port = _validate_port(port, allow_ephemeral=allow_ephemeral_port)
     database = _validate_database(values.get("SKI_CA_DATABASE"))
     return RuntimeConfiguration(
         bind=validated_bind,
