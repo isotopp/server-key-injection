@@ -336,6 +336,50 @@ def test_successful_password_verification_rehashes_outdated_parameters(
         database.close()
 
 
+def test_password_verification_uses_dummy_hasher_for_unknown_and_disabled_users(
+    tmp_path: Path,
+) -> None:
+    """Unknown and disabled users still perform a dummy password verification."""
+
+    class RecordingHasher:
+        def __init__(self) -> None:
+            self.hash_inputs: list[str] = []
+            self.verifications: list[tuple[str, str]] = []
+
+        def hash(self, password: str) -> str:
+            self.hash_inputs.append(password)
+            return f"hash:{password}"
+
+        def verify(self, verifier: str, password: str) -> bool:
+            self.verifications.append((verifier, password))
+            return verifier == "hash:password" and password == "password"
+
+        def check_needs_rehash(self, verifier: str) -> bool:
+            del verifier
+            return False
+
+    database = StateDatabase.open(tmp_path / "state.sqlite3")
+    try:
+        hasher = RecordingHasher()
+        store = SqliteIdentityStore(
+            database,
+            password_hasher=cast(PasswordHasher, hasher),
+        )
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+
+        assert store.verify_password("missing", "password") is False
+        store.set_user_enabled("alice", False)
+        assert store.verify_password("alice", "password") is False
+
+        assert hasher.hash_inputs == ["password", "ski-dummy-password"]
+        assert hasher.verifications == [
+            ("hash:ski-dummy-password", "password"),
+            ("hash:ski-dummy-password", "password"),
+        ]
+    finally:
+        database.close()
+
+
 def test_failed_credential_replacement_preserves_prior_working_material(
     tmp_path: Path,
 ) -> None:

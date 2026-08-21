@@ -25,6 +25,8 @@ from ski.policy import (
 )
 from ski.state import StateDatabase
 
+_DUMMY_PASSWORD = "ski-dummy-password"
+
 
 class IdentityStoreError(RuntimeError):
     """Base error for identity data or identity-store operations."""
@@ -263,6 +265,7 @@ class SqliteIdentityStore(IdentityStore):
         self._password_hasher = (
             PasswordHasher() if password_hasher is None else password_hasher
         )
+        self._dummy_password_verifier: str | None = None
         self._totp_verifier = totp_verifier
         if database.schema_version != 4:
             raise IdentityUnavailableError("identity schema is unavailable")
@@ -364,8 +367,13 @@ class SqliteIdentityStore(IdentityStore):
 
     def verify_password(self, username: str, password: str) -> bool:
         try:
-            record = self.get_user(username)
+            try:
+                record = self.get_user(username)
+            except IdentityNotFoundError:
+                self._verify_dummy_password(password)
+                return False
             if not record.enabled:
+                self._verify_dummy_password(password)
                 return False
             verified = bool(
                 self._password_hasher.verify(record.password_verifier, password)
@@ -381,6 +389,15 @@ class SqliteIdentityStore(IdentityStore):
             return verified
         except (IdentityStoreError, TypeError, VerificationError, InvalidHashError):
             return False
+
+    def _verify_dummy_password(self, password: str) -> None:
+        """Verify against a cached Argon2 hash when no credential is usable."""
+        if self._dummy_password_verifier is None:
+            self._dummy_password_verifier = self._password_hasher.hash(_DUMMY_PASSWORD)
+        try:
+            self._password_hasher.verify(self._dummy_password_verifier, password)
+        except (TypeError, VerificationError, InvalidHashError):
+            return
 
     def verify_totp(self, username: str, code: str, *, now: int | None = None) -> bool:
         try:
