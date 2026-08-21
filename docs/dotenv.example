@@ -8,9 +8,10 @@
 # and stops at the first existing file. Exported environment variables take
 # precedence over values in the selected file.
 
-# Required by the current daemon. The parent directory must already exist and
-# be writable by the account running ski. The Epic 2 tracer creates only its
-# foundational SQLite schema here; it does not create persistent CA material.
+# Required by the current demo daemon. The parent directory must already exist
+# and be writable by the account running ski. The database contains the
+# foundational host-key and demo-identity schema; it does not contain
+# persistent user-CA material.
 SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
 
 # The Epic 3 issuer SSH host key is not an environment setting. ski stores its

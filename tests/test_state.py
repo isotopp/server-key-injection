@@ -61,6 +61,21 @@ def test_state_database_creates_only_non_ca_schema(tmp_path: Path) -> None:
         database.close()
 
 
+def test_state_schema_contains_only_current_demo_tables(tmp_path: Path) -> None:
+    """The Epic 3 database has no CA, certificate, revocation, or audit tables."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        assert database.table_names == {
+            "ski_schema",
+            "ssh_host_keys",
+            "users",
+            "groups",
+            "user_groups",
+        }
+    finally:
+        database.close()
+
+
 def test_state_database_reopens_idempotently(tmp_path: Path) -> None:
     """A restart can reacquire the same supported schema."""
     database_path = tmp_path / "state.sqlite3"

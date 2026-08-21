@@ -87,3 +87,13 @@ def test_invalid_runtime_configuration_is_rejected(
             directory=tmp_path,
             home_directory=tmp_path,
         )
+
+
+def test_dotenv_example_documents_database_backed_host_key() -> None:
+    """The example does not offer a host-key environment override."""
+    example = (Path(__file__).parents[1] / "docs" / "dotenv.example").read_text()
+
+    assert "SKI_CA_DATABASE=" in example
+    assert "stores its" in example
+    assert "SKI_HOST_KEY" not in example
+    assert "SKI_CA_HOST_KEY" not in example

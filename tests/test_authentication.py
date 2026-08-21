@@ -251,6 +251,49 @@ def test_failed_exchange_requires_a_new_connection_for_retry(tmp_path: Path) -> 
         database.close()
 
 
+def test_authentication_denial_does_not_echo_factor_or_store_details(
+    tmp_path: Path,
+) -> None:
+    """Denied MFA responses expose no password, TOTP, or backend detail."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3")
+    try:
+        store = SqliteIdentityStore(database)
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        password = "DENIAL_PASSWORD_MARKER"
+        code = "DENIAL_TOTP_MARKER"
+
+        async def exercise() -> None:
+            issuer = TracerIssuer(
+                bind="127.0.0.1",
+                port=0,
+                identity_store=store,
+            )
+            await issuer.start()
+            try:
+                client = _MfaClient(password, code)
+                with pytest.raises(
+                    (asyncssh.PermissionDenied, asyncssh.ConnectionLost),
+                ) as denied:
+                    async with asyncssh.connect(
+                        "127.0.0.1",
+                        port=issuer.port,
+                        username="alice",
+                        known_hosts=None,
+                        client_factory=lambda: client,
+                        kbdint_auth=True,
+                    ):
+                        pass
+                assert password not in str(denied.value)
+                assert code not in str(denied.value)
+                assert "identity data" not in str(denied.value)
+            finally:
+                await issuer.close()
+
+        asyncio.run(exercise())
+    finally:
+        database.close()
+
+
 @pytest.mark.parametrize("offset", [-60, -30, 0, 30, 60])
 def test_totp_window_is_enforced_through_real_ssh(
     offset: int,

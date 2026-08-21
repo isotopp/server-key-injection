@@ -1,10 +1,10 @@
 # ski
 
 > [!WARNING]
-> **Incomplete test server — do not deploy.** The current implementation is an
-> unauthenticated tracer only. It uses an in-memory disposable CA, has no
-> persistent state or identity store, and no production host trusts the
-> certificates it issues.
+> **Incomplete test server — do not deploy.** The current implementation is a
+> demo-only issuer with SQLite-backed password/TOTP identities and an
+> in-memory, one-hour disposable CA. It does not issue persistent 25-hour
+> certificates, and no production host trusts the credentials it creates.
 
 `ski` will issue short-lived, signed SSH certificates and load them into a
 user's existing `ssh-agent`. The currently implemented tracer proves the
@@ -51,6 +51,9 @@ In Terminal 2, start the local test issuer on the unprivileged tracer port:
 ```console
 mkdir -p /tmp/ski-smoke
 SKI_CA_DATABASE=/tmp/ski-smoke/state.sqlite3 \
+  uv run ski user add test-user
+# Save the displayed Base32 TOTP secret for the login below.
+SKI_CA_DATABASE=/tmp/ski-smoke/state.sqlite3 \
   uv run ski serve --bind 127.0.0.1 --port 2222
 ```
 
@@ -64,8 +67,9 @@ ssh -A -tt -p 2222 \
   test-user@127.0.0.1
 ```
 
-The issuer reports `Key loaded: test-...` and closes the session. Verify the
-local agent:
+Enter the enrollment password and the current six-digit TOTP generated from
+the displayed secret. The issuer reports `Key loaded: test-...`, followed by
+`Groups: (none)`, and closes the session. Verify the local agent:
 
 ```console
 ssh-add -l

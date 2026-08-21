@@ -273,6 +273,78 @@ def test_runtime_restart_keeps_host_key_but_rotates_disposable_user_ca(
     finally:
         database.close()
 
+    async def exercise() -> tuple[str, set[bytes], str, set[bytes]]:
+        agent_environment = await _start_test_agent()
+        try:
+            observations: list[tuple[str, set[bytes]]] = []
+            for _ in range(2):
+                runtime = ServiceRuntime(
+                    bind="127.0.0.1",
+                    port=0,
+                    exported_environment={"SKI_CA_DATABASE": str(database_path)},
+                    event_sink=MemoryEventSink(),
+                )
+                await runtime.start()
+                try:
+                    async with asyncssh.connect(
+                        "127.0.0.1",
+                        port=runtime.issuer.port,
+                        username="alice",
+                        known_hosts=None,
+                        agent_path=agent_environment["SSH_AUTH_SOCK"],
+                        agent_forwarding=True,
+                        client_factory=lambda: _MfaClient(
+                            "password",
+                            pyotp.TOTP("JBSWY3DPEHPK3PXP").now(),
+                        ),
+                        kbdint_auth=True,
+                    ) as connection:
+                        process = await connection.create_process(
+                            command=None,
+                            request_pty=False,
+                        )
+                        stdout, stderr = await process.communicate()
+                        assert process.exit_status == 0
+                        assert stdout.startswith("Key loaded: test-")
+                        assert stderr == ""
+                        host_key = connection.get_server_host_key()
+                        assert host_key is not None
+                        fingerprint = host_key.get_fingerprint()
+
+                    listed = await asyncio.create_subprocess_exec(
+                        "ssh-add",
+                        "-L",
+                        env={**os.environ, **agent_environment},
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    listing, errors = await listed.communicate()
+                    assert listed.returncode == 0, errors.decode()
+                    observations.append(
+                        (
+                            fingerprint,
+                            {line for line in listing.splitlines() if b"test-" in line},
+                        ),
+                    )
+                finally:
+                    await runtime.close()
+            return (
+                observations[0][0],
+                observations[0][1],
+                observations[1][0],
+                observations[1][1],
+            )
+        finally:
+            await _stop_test_agent(agent_environment)
+
+    try:
+        first_host, first_keys, second_host, second_keys = asyncio.run(exercise())
+        assert first_host == second_host
+        assert first_keys
+        assert second_keys - first_keys
+    finally:
+        database.close()
+
 
 def test_authenticated_completion_event_is_redacted_and_group_aware(
     tmp_path: Path,
@@ -346,74 +418,69 @@ def test_authenticated_completion_event_is_redacted_and_group_aware(
     finally:
         database.close()
 
-    async def exercise() -> tuple[str, set[bytes], str, set[bytes]]:
-        agent_environment = await _start_test_agent()
-        try:
-            observations: list[tuple[str, set[bytes]]] = []
-            for _ in range(2):
-                runtime = ServiceRuntime(
-                    bind="127.0.0.1",
-                    port=0,
-                    exported_environment={"SKI_CA_DATABASE": str(database_path)},
-                    event_sink=MemoryEventSink(),
-                )
-                await runtime.start()
-                try:
-                    async with asyncssh.connect(
-                        "127.0.0.1",
-                        port=runtime.issuer.port,
-                        username="alice",
-                        known_hosts=None,
-                        agent_path=agent_environment["SSH_AUTH_SOCK"],
-                        agent_forwarding=True,
-                        client_factory=lambda: _MfaClient(
-                            "password",
-                            pyotp.TOTP("JBSWY3DPEHPK3PXP").now(),
-                        ),
-                        kbdint_auth=True,
-                    ) as connection:
-                        process = await connection.create_process(
-                            command=None,
-                            request_pty=False,
-                        )
-                        stdout, stderr = await process.communicate()
-                        assert process.exit_status == 0
-                        assert stdout.startswith("Key loaded: test-")
-                        assert stderr == ""
-                        host_key = connection.get_server_host_key()
-                        assert host_key is not None
-                        fingerprint = host_key.get_fingerprint()
 
-                    listed = await asyncio.create_subprocess_exec(
-                        "ssh-add",
-                        "-L",
-                        env={**os.environ, **agent_environment},
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    listing, errors = await listed.communicate()
-                    assert listed.returncode == 0, errors.decode()
-                    observations.append(
-                        (
-                            fingerprint,
-                            {line for line in listing.splitlines() if b"test-" in line},
-                        ),
-                    )
-                finally:
-                    await runtime.close()
-            return (
-                observations[0][0],
-                observations[0][1],
-                observations[1][0],
-                observations[1][1],
-            )
+def test_injection_failure_response_and_event_are_redacted(tmp_path: Path) -> None:
+    """An unavailable forwarded agent cannot expose credentials or transport data."""
+    database_path = tmp_path / "state.sqlite3"
+    database = StateDatabase.open(database_path)
+    try:
+        user = SqliteIdentityStore(database).create_user(
+            "alice",
+            "password",
+            "JBSWY3DPEHPK3PXP",
+        )
+    finally:
+        database.close()
+
+    async def exercise() -> list[Event]:
+        sink = MemoryEventSink()
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            event_sink=sink,
+        )
+        await runtime.start()
+        try:
+            async with asyncssh.connect(
+                "127.0.0.1",
+                port=runtime.issuer.port,
+                username="alice",
+                known_hosts=None,
+                agent_path="/tmp/ski-test-agent-does-not-exist",
+                agent_forwarding=True,
+                client_factory=lambda: _MfaClient(
+                    "password",
+                    pyotp.TOTP(user.totp_secret).now(),
+                ),
+                kbdint_auth=True,
+            ) as connection:
+                process = await connection.create_process(
+                    command=None,
+                    request_pty=False,
+                )
+                stdout, stderr = await process.communicate()
+                assert process.exit_status == 1
+                assert stdout == ""
+                assert stderr == "Tracer request failed.\n"
         finally:
-            await _stop_test_agent(agent_environment)
+            await runtime.close()
+        return list(sink.events)
 
     try:
-        first_host, first_keys, second_host, second_keys = asyncio.run(exercise())
-        assert first_host == second_host
-        assert first_keys
-        assert second_keys - first_keys
+        events = asyncio.run(exercise())
+        failure = next(
+            event for event in events if event.name == "tracer_request_failed"
+        )
+        assert set(failure.fields) == {
+            "SKI_REQUEST_ID",
+            "SKI_IDENTITY",
+            "SKI_DECISION",
+            "SKI_GROUPS",
+        }
+        assert failure.fields["SKI_DECISION"] == "deny"
+        rendered = repr(events)
+        assert "-----BEGIN" not in rendered
+        assert "agent" not in rendered.lower()
     finally:
         database.close()

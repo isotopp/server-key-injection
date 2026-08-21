@@ -25,6 +25,17 @@ def test_help_describes_certificate_issuance(
     assert "short-lived SSH certificates" in capsys.readouterr().out
 
 
+def test_cli_help_lists_only_the_current_demo_surface() -> None:
+    """The public help exposes service and demo identity commands only."""
+    help_text = build_parser().format_help()
+    for command in ("serve", "user", "group"):
+        assert command in help_text
+    command_line = next(
+        line for line in help_text.splitlines() if line.startswith("  {")
+    )
+    assert command_line == "  {serve,user,group}"
+
+
 def test_serve_accepts_tracer_listener_options() -> None:
     """The test issuer exposes the documented listener options."""
     args = build_parser().parse_args(["serve", "--bind", "127.0.0.1", "--port", "2222"])
