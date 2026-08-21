@@ -63,6 +63,7 @@ class EnrolledRuntime:
     user: UserRecord
     database: Path
     agent_environment: dict[str, str]
+    event_sink: MemoryEventSink
 
 
 @asynccontextmanager
@@ -87,16 +88,19 @@ async def enrolled_runtime(
     finally:
         state.close()
 
+    event_sink = MemoryEventSink()
     runtime = ServiceRuntime(
         bind="127.0.0.1",
         port=0,
         exported_environment=runtime_environment(tmp_path, database),
-        event_sink=MemoryEventSink(),
+        event_sink=event_sink,
     )
     await runtime.start()
     try:
         async with ssh_agent() as agent_environment:
-            yield EnrolledRuntime(runtime, user, database, agent_environment)
+            yield EnrolledRuntime(
+                runtime, user, database, agent_environment, event_sink
+            )
     finally:
         await runtime.close()
 
