@@ -15,7 +15,7 @@ import pytest
 from ski.ca import load_validated_active_ca
 from ski.credentials import OrdinaryIssuanceService
 from ski.identities import IdentitySnapshot, SqliteIdentityStore
-from ski.injection import OrdinaryAgentInjector, TracerAgentInjector
+from ski.injection import OrdinaryAgentInjector
 from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
@@ -55,70 +55,6 @@ async def _stop_test_agent(environment: dict[str, str]) -> None:
     )
     await process.communicate()
     Path(environment["SSH_AUTH_SOCK"]).unlink(missing_ok=True)
-
-
-def test_authenticated_forwarded_request_injects_dummy_identity_and_groups(
-    tmp_path: Path,
-) -> None:
-    """MFA and forwarding produce one disposable identity and group summary."""
-    database = StateDatabase.open(tmp_path / "state.sqlite3")
-
-    async def exercise() -> None:
-        agent_environment = await _start_test_agent()
-        try:
-            store = SqliteIdentityStore(database)
-            user = store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
-            store.create_group("platform-ops")
-            store.add_membership("platform-ops", "alice")
-            issuer = TracerIssuer(
-                bind="127.0.0.1",
-                port=0,
-                identity_store=store,
-                request_handler=TracerAgentInjector().handle,
-            )
-            await issuer.start()
-            try:
-                async with asyncssh.connect(
-                    "127.0.0.1",
-                    port=issuer.port,
-                    username="alice",
-                    known_hosts=None,
-                    agent_path=agent_environment["SSH_AUTH_SOCK"],
-                    agent_forwarding=True,
-                    client_factory=mfa_client_factory(
-                        "password", pyotp.TOTP(user.totp_secret).now()
-                    ),
-                    kbdint_auth=True,
-                ) as connection:
-                    process = await connection.create_process(
-                        command=None,
-                        request_pty=False,
-                    )
-                    stdout, stderr = await process.communicate()
-                    assert process.exit_status == 0
-                    assert stdout.startswith("Key loaded: test-")
-                    assert "Groups: platform-ops" in stdout
-                    assert stderr == ""
-
-                listed = await asyncio.create_subprocess_exec(
-                    "ssh-add",
-                    "-l",
-                    env={**os.environ, **agent_environment},
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                listing, errors = await listed.communicate()
-                assert listed.returncode == 0, errors.decode()
-                assert b"test-" in listing
-            finally:
-                await issuer.close()
-        finally:
-            await _stop_test_agent(agent_environment)
-
-    try:
-        asyncio.run(exercise())
-    finally:
-        database.close()
 
 
 def test_ordinary_renewal_preserves_an_unrelated_agent_identity(
@@ -267,6 +203,8 @@ def test_persistence_failure_compensates_only_the_new_issuer_credential(
             extensions=("pty",),
             serial_allocator=lambda: 123,
         )
+        store = SqliteIdentityStore(database)
+        user = store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
 
         class FailingCommitIssuance:
             active_ca = issuance.active_ca
@@ -302,12 +240,13 @@ def test_persistence_failure_compensates_only_the_new_issuer_credential(
                     cast(OrdinaryIssuanceService, FailingCommitIssuance()),
                 )
 
-                async def request_handler(
+                async def authenticated_request_handler(
                     connection: asyncssh.SSHServerConnection,
+                    authenticated_identity: IdentitySnapshot,
                 ) -> str:
                     await injector.handle(
                         connection,
-                        IdentitySnapshot("alice", ()),
+                        authenticated_identity,
                         request_id="request-failure",
                     )
                     return "unreachable"
@@ -315,17 +254,22 @@ def test_persistence_failure_compensates_only_the_new_issuer_credential(
                 issuer = TracerIssuer(
                     bind="127.0.0.1",
                     port=0,
-                    request_handler=request_handler,
+                    identity_store=store,
+                    authenticated_request_handler=authenticated_request_handler,
                 )
                 await issuer.start()
                 try:
                     async with asyncssh.connect(
                         "127.0.0.1",
                         port=issuer.port,
-                        username="test-user",
+                        username="alice",
                         known_hosts=None,
                         agent_path=agent_environment["SSH_AUTH_SOCK"],
                         agent_forwarding=True,
+                        client_factory=mfa_client_factory(
+                            "password", pyotp.TOTP(user.totp_secret).now()
+                        ),
+                        kbdint_auth=True,
                     ) as connection:
                         process = await connection.create_process(
                             command=None,
@@ -334,7 +278,7 @@ def test_persistence_failure_compensates_only_the_new_issuer_credential(
                         stdout, stderr = await process.communicate()
                         assert process.exit_status == 1
                         assert stdout == ""
-                        assert stderr == "Tracer request failed.\n"
+                        assert stderr == "Certificate request failed.\n"
                 finally:
                     await issuer.close()
 
@@ -370,6 +314,8 @@ def test_agent_workflow_retries_a_typed_serial_collision(
             public_path=Path(environment["SKI_CA_PUBLIC_KEY"]),
         )
         identity = IdentitySnapshot("alice", ())
+        store = SqliteIdentityStore(database)
+        user = store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
         first = OrdinaryIssuanceService(
             database,
             active_ca,
@@ -390,12 +336,13 @@ def test_agent_workflow_retries_a_typed_serial_collision(
         async def exercise() -> bytes:
             async with ssh_agent() as agent_environment:
 
-                async def request_handler(
+                async def authenticated_request_handler(
                     connection: asyncssh.SSHServerConnection,
+                    authenticated_identity: IdentitySnapshot,
                 ) -> str:
                     await injector.handle(
                         connection,
-                        identity,
+                        authenticated_identity,
                         request_id="request-collision",
                     )
                     return "ordinary"
@@ -403,17 +350,22 @@ def test_agent_workflow_retries_a_typed_serial_collision(
                 issuer = TracerIssuer(
                     bind="127.0.0.1",
                     port=0,
-                    request_handler=request_handler,
+                    identity_store=store,
+                    authenticated_request_handler=authenticated_request_handler,
                 )
                 await issuer.start()
                 try:
                     async with asyncssh.connect(
                         "127.0.0.1",
                         port=issuer.port,
-                        username="test-user",
+                        username="alice",
                         known_hosts=None,
                         agent_path=agent_environment["SSH_AUTH_SOCK"],
                         agent_forwarding=True,
+                        client_factory=mfa_client_factory(
+                            "password", pyotp.TOTP(user.totp_secret).now()
+                        ),
+                        kbdint_auth=True,
                     ) as connection:
                         process = await connection.create_process(
                             command=None,
@@ -421,7 +373,7 @@ def test_agent_workflow_retries_a_typed_serial_collision(
                         )
                         stdout, stderr = await process.communicate()
                         assert process.exit_status == 0
-                        assert stdout == "Key loaded: ordinary\n"
+                        assert stdout == "Key loaded: ordinary\nGroups: (none)\n"
                         assert stderr == ""
 
                     listing_process = await asyncio.create_subprocess_exec(
@@ -460,7 +412,6 @@ def test_authenticated_request_without_forwarding_does_not_inject(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=store,
-                request_handler=TracerAgentInjector().handle,
             )
             await issuer.start()
             try:
@@ -524,7 +475,6 @@ def test_group_snapshot_failure_denies_before_agent_injection(tmp_path: Path) ->
                 bind="127.0.0.1",
                 port=0,
                 identity_store=BrokenGroupStore(database),
-                request_handler=TracerAgentInjector().handle,
             )
             await issuer.start()
             try:
