@@ -8,23 +8,34 @@
 # and stops at the first existing file. Exported environment variables take
 # precedence over values in the selected file.
 
-# Required by the current demo daemon. The parent directory must already exist
-# and be writable by the account running ski. The database contains the
-# foundational host-key and demo-identity schema; it does not contain
-# persistent user-CA material.
+# Required by the daemon. The parent directory must already exist and be
+# writable by the account running ski. SQLite contains the host key, demo
+# identities, persistent CA metadata, and redacted issuance records; it never
+# contains CA or generated user private-key bytes.
 SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
 
-# The Epic 3 issuer SSH host key is not an environment setting. ski stores its
+# The issuer SSH host key is not an environment setting. ski stores its
 # persistent Ed25519 host key in SKI_CA_DATABASE; distributing its public key,
 # backups, and rotation remain external operational responsibilities.
 
-# Persistent CA and certificate settings for later epics. These are documented
-# here so deployment configuration can be prepared, but the current test tracer
-# does not read or require them.
-# SKI_CA_PRIVATE_KEY=/etc/ski/keys/user_ca
-# SKI_CA_PUBLIC_KEY=/etc/ski/keys/user_ca.pub
-# SKI_CA_KRL=/var/lib/ski/revoked.krl
-# SKI_CERTIFICATE_LIFETIME=25h
+# Persistent ordinary user-CA material. Parent directories must already exist
+# and be writable by the account running ski. The CA is Ed25519-only; the
+# private key is never stored in SQLite or printed by the CLI.
+SKI_CA_PRIVATE_KEY=/etc/ski/keys/user_ca
+SKI_CA_PUBLIC_KEY=/etc/ski/keys/user_ca.pub
+SKI_CA_KRL=/var/lib/ski/revoked.krl
+
+# Comma-separated ordinary certificate extensions. The supported values map to
+# OpenSSH certificate extensions as follows:
+#   pty              allow a pseudo-terminal
+#   agent-forwarding allow SSH agent forwarding
+#   port-forwarding  allow ordinary TCP forwarding (no permitopen restriction)
+#   x11-forwarding   allow X11 forwarding
+#   user-rc          allow the user's ~/.ssh/rc hook
+# Omit a value to deny that capability. In particular, port forwarding is
+# disabled unless port-forwarding is explicitly listed. The lifetime is fixed
+# at exactly 25 hours; there is no lifetime environment override.
+ORDINARY_CERT_EXTENSIONS=pty
 
 # Bind address and port are command-line options, not environment settings:
 #   uv run ski serve --bind 127.0.0.1 --port 2222

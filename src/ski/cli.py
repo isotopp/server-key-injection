@@ -119,7 +119,11 @@ def _new_totp_secret() -> str:
 
 def _open_identity_store() -> tuple[StateDatabase, SqliteIdentityStore]:
     """Open the configured identity store for one short admin operation."""
-    configuration = load_runtime_configuration(bind="127.0.0.1", port=22)
+    configuration = load_runtime_configuration(
+        bind="127.0.0.1",
+        port=22,
+        require_ordinary_ca=False,
+    )
     database = StateDatabase.open(configuration.database)
     return database, SqliteIdentityStore(database)
 

@@ -18,6 +18,7 @@ from ski.journal import Event, MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
 from ski.state import StateDatabase
+from support import runtime_environment
 
 
 async def _start_test_agent() -> dict[str, str]:
@@ -281,7 +282,7 @@ def test_runtime_restart_keeps_host_key_but_rotates_disposable_user_ca(
                 runtime = ServiceRuntime(
                     bind="127.0.0.1",
                     port=0,
-                    exported_environment={"SKI_CA_DATABASE": str(database_path)},
+                    exported_environment=runtime_environment(tmp_path, database_path),
                     event_sink=MemoryEventSink(),
                 )
                 await runtime.start()
@@ -366,7 +367,7 @@ def test_authenticated_completion_event_is_redacted_and_group_aware(
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            exported_environment=runtime_environment(tmp_path, database_path),
             event_sink=sink,
         )
         await runtime.start()
@@ -437,7 +438,7 @@ def test_injection_failure_response_and_event_are_redacted(tmp_path: Path) -> No
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            exported_environment=runtime_environment(tmp_path, database_path),
             event_sink=sink,
         )
         await runtime.start()

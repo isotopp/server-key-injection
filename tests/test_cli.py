@@ -76,6 +76,10 @@ def test_serve_exits_cleanly_on_service_signal(
 
     environment = os.environ.copy()
     environment["SKI_CA_DATABASE"] = str(tmp_path / "state.sqlite3")
+    environment["SKI_CA_PRIVATE_KEY"] = str(tmp_path / "user_ca")
+    environment["SKI_CA_PUBLIC_KEY"] = str(tmp_path / "user_ca.pub")
+    environment["SKI_CA_KRL"] = str(tmp_path / "revoked.krl")
+    environment["ORDINARY_CERT_EXTENSIONS"] = "pty"
     process = subprocess.Popen(
         [
             sys.executable,
@@ -115,6 +119,10 @@ def test_serve_reloads_on_sighup_without_exiting(tmp_path: Path) -> None:
 
     environment = os.environ.copy()
     environment["SKI_CA_DATABASE"] = str(tmp_path / "state.sqlite3")
+    environment["SKI_CA_PRIVATE_KEY"] = str(tmp_path / "user_ca")
+    environment["SKI_CA_PUBLIC_KEY"] = str(tmp_path / "user_ca.pub")
+    environment["SKI_CA_KRL"] = str(tmp_path / "revoked.krl")
+    environment["ORDINARY_CERT_EXTENSIONS"] = "pty"
     process = subprocess.Popen(
         [
             sys.executable,

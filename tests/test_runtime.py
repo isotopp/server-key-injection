@@ -12,10 +12,12 @@ import asyncssh
 import pyotp
 import pytest
 
+from ski.configuration import ConfigurationError
 from ski.identities import SqliteIdentityStore
 from ski.journal import MemoryEventSink
 from ski.runtime import IssuerFactory, ServiceRuntime, StateOpener
 from ski.state import StateDatabase, StateError
+from support import runtime_environment
 
 
 class _RuntimeMfaClient(asyncssh.SSHClient):
@@ -36,6 +38,28 @@ class _RuntimeMfaClient(asyncssh.SSHClient):
         return [self.password, self.code]
 
 
+def test_service_runtime_rejects_missing_ordinary_ca_before_ready(
+    tmp_path: Path,
+) -> None:
+    """The foreground service fails closed before opening a listener."""
+
+    async def exercise() -> None:
+        sink = MemoryEventSink()
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            event_sink=sink,
+        )
+        with pytest.raises(ConfigurationError, match="SKI_CA_PRIVATE_KEY"):
+            await runtime.start()
+        assert sink.events[-1].name == "service_start_failed"
+        with pytest.raises(RuntimeError, match="not started"):
+            runtime.issuer
+
+    asyncio.run(exercise())
+
+
 def test_service_runtime_starts_state_and_listener_before_ready_event(
     tmp_path: Path,
 ) -> None:
@@ -46,7 +70,10 @@ def test_service_runtime_starts_state_and_listener_before_ready_event(
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            exported_environment=runtime_environment(
+                tmp_path,
+                tmp_path / "state.sqlite3",
+            ),
             event_sink=sink,
         )
         await runtime.start()
@@ -79,7 +106,7 @@ def test_runtime_reuses_the_database_host_key_after_restart(tmp_path: Path) -> N
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            exported_environment=runtime_environment(tmp_path, database_path),
             event_sink=MemoryEventSink(),
         )
         await runtime.start()
@@ -131,7 +158,7 @@ def test_runtime_rejects_corrupt_host_identity_before_listener_start(
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            exported_environment=runtime_environment(tmp_path, database_path),
             event_sink=sink,
         )
         with pytest.raises(StateError, match="host key is invalid"):
@@ -152,7 +179,11 @@ def test_runtime_reload_swaps_a_valid_configuration_snapshot(
 ) -> None:
     """A valid reload advances the generation without moving the listener."""
     (tmp_path / ".env").write_text(
-        f"SKI_CA_DATABASE={tmp_path / 'state.sqlite3'}\nSKI_CONFIG_MARKER=one\n",
+        f"SKI_CA_DATABASE={tmp_path / 'state.sqlite3'}\n"
+        f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
+        f"SKI_CA_PUBLIC_KEY={tmp_path / 'user_ca.pub'}\n"
+        f"SKI_CA_KRL={tmp_path / 'revoked.krl'}\n"
+        "ORDINARY_CERT_EXTENSIONS=pty\nSKI_CONFIG_MARKER=one\n",
     )
     monkeypatch.chdir(tmp_path)
 
@@ -170,6 +201,10 @@ def test_runtime_reload_swaps_a_valid_configuration_snapshot(
             first_port = runtime.issuer.port
             (tmp_path / ".env").write_text(
                 f"SKI_CA_DATABASE={tmp_path / 'state.sqlite3'}\n"
+                f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
+                f"SKI_CA_PUBLIC_KEY={tmp_path / 'user_ca.pub'}\n"
+                f"SKI_CA_KRL={tmp_path / 'revoked.krl'}\n"
+                "ORDINARY_CERT_EXTENSIONS=pty\n"
                 "SKI_CONFIG_MARKER=two\n",
             )
 
@@ -191,7 +226,11 @@ def test_runtime_reload_rejects_startup_only_changes_and_invalid_candidates(
     """Rejected reloads leave the complete previous snapshot active."""
     database_path = tmp_path / "state.sqlite3"
     (tmp_path / ".env").write_text(
-        f"SKI_CA_DATABASE={database_path}\nSKI_CONFIG_MARKER=one\n",
+        f"SKI_CA_DATABASE={database_path}\n"
+        f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
+        f"SKI_CA_PUBLIC_KEY={tmp_path / 'user_ca.pub'}\n"
+        f"SKI_CA_KRL={tmp_path / 'revoked.krl'}\n"
+        "ORDINARY_CERT_EXTENSIONS=pty\nSKI_CONFIG_MARKER=one\n",
     )
     monkeypatch.chdir(tmp_path)
 
@@ -207,6 +246,10 @@ def test_runtime_reload_rejects_startup_only_changes_and_invalid_candidates(
         try:
             (tmp_path / ".env").write_text(
                 f"SKI_CA_DATABASE={tmp_path / 'other.sqlite3'}\n"
+                f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
+                f"SKI_CA_PUBLIC_KEY={tmp_path / 'user_ca.pub'}\n"
+                f"SKI_CA_KRL={tmp_path / 'revoked.krl'}\n"
+                "ORDINARY_CERT_EXTENSIONS=pty\n"
                 "SKI_CONFIG_MARKER=two\n",
             )
             assert not await runtime.reload()
@@ -230,7 +273,11 @@ def test_requests_keep_the_snapshot_with_which_they_started(
     """Requests retain their original snapshot across an accepted reload."""
     database_path = tmp_path / "state.sqlite3"
     (tmp_path / ".env").write_text(
-        f"SKI_CA_DATABASE={database_path}\nSKI_CONFIG_MARKER=one\n",
+        f"SKI_CA_DATABASE={database_path}\n"
+        f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
+        f"SKI_CA_PUBLIC_KEY={tmp_path / 'user_ca.pub'}\n"
+        f"SKI_CA_KRL={tmp_path / 'revoked.krl'}\n"
+        "ORDINARY_CERT_EXTENSIONS=pty\nSKI_CONFIG_MARKER=one\n",
     )
     monkeypatch.chdir(tmp_path)
 
@@ -245,7 +292,11 @@ def test_requests_keep_the_snapshot_with_which_they_started(
         try:
             async with runtime.request_scope() as request_configuration:
                 (tmp_path / ".env").write_text(
-                    f"SKI_CA_DATABASE={database_path}\nSKI_CONFIG_MARKER=two\n",
+                    f"SKI_CA_DATABASE={database_path}\n"
+                    f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
+                    f"SKI_CA_PUBLIC_KEY={tmp_path / 'user_ca.pub'}\n"
+                    f"SKI_CA_KRL={tmp_path / 'revoked.krl'}\n"
+                    "ORDINARY_CERT_EXTENSIONS=pty\nSKI_CONFIG_MARKER=two\n",
                 )
                 assert await runtime.reload()
                 assert request_configuration.values["SKI_CONFIG_MARKER"] == "one"
@@ -272,7 +323,10 @@ def test_service_runtime_reports_state_failure_without_starting_listener(
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            exported_environment=runtime_environment(
+                tmp_path,
+                tmp_path / "state.sqlite3",
+            ),
             event_sink=sink,
             state_opener=cast(StateOpener, fail_open),
         )
@@ -296,7 +350,7 @@ def test_service_runtime_close_releases_state_and_is_idempotent(tmp_path: Path) 
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            exported_environment=runtime_environment(tmp_path, database_path),
             event_sink=sink,
         )
         await runtime.start()
@@ -334,7 +388,7 @@ def test_listener_start_failure_releases_state_ownership(tmp_path: Path) -> None
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=2222,
-            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            exported_environment=runtime_environment(tmp_path, database_path),
             event_sink=sink,
             issuer_factory=cast(IssuerFactory, lambda **_: FailingIssuer()),
         )
@@ -357,7 +411,10 @@ def test_shutdown_drains_an_in_flight_request_before_releasing_state(
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            exported_environment=runtime_environment(
+                tmp_path,
+                tmp_path / "state.sqlite3",
+            ),
             event_sink=MemoryEventSink(),
         )
         await runtime.start()
@@ -389,7 +446,10 @@ def test_shutdown_cancels_requests_beyond_the_grace_period(tmp_path: Path) -> No
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            exported_environment=runtime_environment(
+                tmp_path,
+                tmp_path / "state.sqlite3",
+            ),
             event_sink=MemoryEventSink(),
         )
         await runtime.start()
@@ -417,7 +477,10 @@ def test_shutdown_request_wakes_the_foreground_waiter(tmp_path: Path) -> None:
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            exported_environment=runtime_environment(
+                tmp_path,
+                tmp_path / "state.sqlite3",
+            ),
             event_sink=MemoryEventSink(),
         )
         await runtime.start()
@@ -436,7 +499,10 @@ def test_control_waiter_distinguishes_reload_from_shutdown(tmp_path: Path) -> No
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            exported_environment=runtime_environment(
+                tmp_path,
+                tmp_path / "state.sqlite3",
+            ),
             event_sink=MemoryEventSink(),
         )
         await runtime.start()

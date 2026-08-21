@@ -15,6 +15,7 @@ from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
 from ski.state import StateDatabase
+from support import runtime_environment
 
 
 class _MfaClient(asyncssh.SSHClient):
@@ -95,7 +96,7 @@ def test_service_runtime_wires_the_sqlite_identity_store_into_the_issuer(
         runtime = ServiceRuntime(
             bind="127.0.0.1",
             port=0,
-            exported_environment={"SKI_CA_DATABASE": str(database_path)},
+            exported_environment=runtime_environment(tmp_path, database_path),
             event_sink=MemoryEventSink(),
         )
         await runtime.start()

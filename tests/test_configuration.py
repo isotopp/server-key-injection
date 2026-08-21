@@ -21,7 +21,11 @@ def test_runtime_configuration_uses_first_file_and_exported_values(
     home_directory = tmp_path / "home"
     home_directory.mkdir()
     (home_directory / ".ski.env").write_text(
-        "SKI_CA_DATABASE=from-home.sqlite3\nSKI_CONFIG_MARKER=home\n",
+        "SKI_CA_DATABASE=from-home.sqlite3\n"
+        f"SKI_CA_PRIVATE_KEY={tmp_path / 'home-ca'}\n"
+        f"SKI_CA_PUBLIC_KEY={tmp_path / 'home-ca.pub'}\n"
+        f"SKI_CA_KRL={tmp_path / 'home.krl'}\n"
+        "ORDINARY_CERT_EXTENSIONS=pty\nSKI_CONFIG_MARKER=home\n",
     )
     system_file = tmp_path / "etc" / "ski" / "env"
     system_file.parent.mkdir(parents=True)
@@ -36,6 +40,10 @@ def test_runtime_configuration_uses_first_file_and_exported_values(
         exported_environment={
             "HOME": str(home_directory),
             "SKI_CA_DATABASE": "from-shell.sqlite3",
+            "SKI_CA_PRIVATE_KEY": str(tmp_path / "shell-ca"),
+            "SKI_CA_PUBLIC_KEY": str(tmp_path / "shell-ca.pub"),
+            "SKI_CA_KRL": str(tmp_path / "shell.krl"),
+            "ORDINARY_CERT_EXTENSIONS": "pty",
         },
     )
 
@@ -46,13 +54,155 @@ def test_runtime_configuration_uses_first_file_and_exported_values(
     assert config.port == 2222
 
 
+def test_runtime_configuration_loads_ordinary_ca_contract(tmp_path: Path) -> None:
+    """A complete environment exposes the fixed ordinary CA policy."""
+    exported = {
+        "SKI_CA_DATABASE": str(tmp_path / "state.sqlite3"),
+        "SKI_CA_PRIVATE_KEY": str(tmp_path / "keys" / "user_ca"),
+        "SKI_CA_PUBLIC_KEY": str(tmp_path / "keys" / "user_ca.pub"),
+        "SKI_CA_KRL": str(tmp_path / "revoked.krl"),
+        "ORDINARY_CERT_EXTENSIONS": "pty, port-forwarding",
+    }
+    (tmp_path / "keys").mkdir()
+
+    config = load_runtime_configuration(
+        bind="127.0.0.1",
+        port=2222,
+        exported_environment=exported,
+        directory=tmp_path,
+        home_directory=tmp_path,
+    )
+
+    assert config.ca_private_key == tmp_path / "keys" / "user_ca"
+    assert config.ca_public_key == tmp_path / "keys" / "user_ca.pub"
+    assert config.ca_krl == tmp_path / "revoked.krl"
+    assert config.ordinary_extensions == ("pty", "port-forwarding")
+    assert config.certificate_lifetime == 25 * 60 * 60
+
+
+def test_runtime_configuration_rejects_unsupported_extension_without_echo(
+    tmp_path: Path,
+) -> None:
+    """Unknown extension policy fails without disclosing the configured value."""
+    (tmp_path / "keys").mkdir()
+    secret_value = "SECRET_EXTENSION_MARKER"
+    environment = {
+        "SKI_CA_DATABASE": str(tmp_path / "state.sqlite3"),
+        "SKI_CA_PRIVATE_KEY": str(tmp_path / "keys" / "user_ca"),
+        "SKI_CA_PUBLIC_KEY": str(tmp_path / "keys" / "user_ca.pub"),
+        "SKI_CA_KRL": str(tmp_path / "revoked.krl"),
+        "ORDINARY_CERT_EXTENSIONS": f"pty,{secret_value}",
+    }
+
+    with pytest.raises(ConfigurationError, match="unsupported value") as error:
+        load_runtime_configuration(
+            bind="127.0.0.1",
+            port=2222,
+            exported_environment=environment,
+            directory=tmp_path,
+            home_directory=tmp_path,
+        )
+
+    assert secret_value not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "SKI_CA_PRIVATE_KEY",
+        "SKI_CA_PUBLIC_KEY",
+        "SKI_CA_KRL",
+        "ORDINARY_CERT_EXTENSIONS",
+    ],
+)
+def test_runtime_configuration_requires_every_ordinary_ca_setting(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    """Missing ordinary-CA settings fail with the setting name only."""
+    (tmp_path / "keys").mkdir()
+    environment = {
+        "SKI_CA_DATABASE": str(tmp_path / "state.sqlite3"),
+        "SKI_CA_PRIVATE_KEY": str(tmp_path / "keys" / "user_ca"),
+        "SKI_CA_PUBLIC_KEY": str(tmp_path / "keys" / "user_ca.pub"),
+        "SKI_CA_KRL": str(tmp_path / "revoked.krl"),
+        "ORDINARY_CERT_EXTENSIONS": "pty",
+    }
+    environment.pop(missing)
+
+    with pytest.raises(ConfigurationError, match=missing):
+        load_runtime_configuration(
+            bind="127.0.0.1",
+            port=2222,
+            exported_environment=environment,
+            directory=tmp_path,
+            home_directory=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("extensions", ["pty,,agent-forwarding", "pty,pty"])
+def test_runtime_configuration_rejects_malformed_extension_policy(
+    tmp_path: Path,
+    extensions: str,
+) -> None:
+    """Empty and duplicate extension entries fail without opening state."""
+    (tmp_path / "keys").mkdir()
+    environment = {
+        "SKI_CA_DATABASE": str(tmp_path / "state.sqlite3"),
+        "SKI_CA_PRIVATE_KEY": str(tmp_path / "keys" / "user_ca"),
+        "SKI_CA_PUBLIC_KEY": str(tmp_path / "keys" / "user_ca.pub"),
+        "SKI_CA_KRL": str(tmp_path / "revoked.krl"),
+        "ORDINARY_CERT_EXTENSIONS": extensions,
+    }
+
+    with pytest.raises(ConfigurationError):
+        load_runtime_configuration(
+            bind="127.0.0.1",
+            port=2222,
+            exported_environment=environment,
+            directory=tmp_path,
+            home_directory=tmp_path,
+        )
+
+
+def test_runtime_configuration_rejects_unavailable_ca_parent_without_echo(
+    tmp_path: Path,
+) -> None:
+    """Output paths cannot create missing parent directories during validation."""
+    marker = "private-ca-parent-marker"
+    environment = {
+        "SKI_CA_DATABASE": str(tmp_path / "state.sqlite3"),
+        "SKI_CA_PRIVATE_KEY": str(tmp_path / marker / "user_ca"),
+        "SKI_CA_PUBLIC_KEY": str(tmp_path / "user_ca.pub"),
+        "SKI_CA_KRL": str(tmp_path / "revoked.krl"),
+        "ORDINARY_CERT_EXTENSIONS": "pty",
+    }
+
+    with pytest.raises(ConfigurationError, match="parent directory") as error:
+        load_runtime_configuration(
+            bind="127.0.0.1",
+            port=2222,
+            exported_environment=environment,
+            directory=tmp_path,
+            home_directory=tmp_path,
+        )
+
+    assert marker not in str(error.value)
+
+
 def test_runtime_configuration_is_immutable(tmp_path: Path) -> None:
     """Callers cannot change a configuration after it is loaded."""
     database = tmp_path / "state.sqlite3"
     config = load_runtime_configuration(
         bind="127.0.0.1",
         port=2222,
-        exported_environment={"SKI_CA_DATABASE": str(database)},
+        exported_environment={
+            "SKI_CA_DATABASE": str(database),
+            "SKI_CA_PRIVATE_KEY": str(tmp_path / "ca"),
+            "SKI_CA_PUBLIC_KEY": str(tmp_path / "ca.pub"),
+            "SKI_CA_KRL": str(tmp_path / "ca.krl"),
+            "ORDINARY_CERT_EXTENSIONS": "pty",
+        },
         directory=tmp_path,
         home_directory=tmp_path,
     )
