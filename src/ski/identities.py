@@ -13,6 +13,7 @@ import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
+from ski.identity_persistence import SqliteIdentityRepository
 from ski.policy import (
     PolicyValidationError,
 )
@@ -171,6 +172,7 @@ class SqliteIdentityStore(IdentityStore):
         totp_verifier: Callable[..., bool] | None = None,
     ) -> None:
         self._database = database
+        self._repository = SqliteIdentityRepository(database)
         self._password_hasher = (
             PasswordHasher() if password_hasher is None else password_hasher
         )
@@ -181,22 +183,17 @@ class SqliteIdentityStore(IdentityStore):
     @property
     def schema_version(self) -> int:
         """Return the schema version exposed by this identity backend."""
-        return self._database.schema_version
+        return self._repository.schema_version
 
     @property
     def table_names(self) -> frozenset[str]:
         """Return the application's current table names."""
-        return self._database.table_names
+        return self._repository.table_names
 
     def get_user(self, username: str) -> UserRecord:
         username = validate_username(username)
         try:
-            with self._database.read_connection() as connection:
-                row = connection.execute(
-                    "SELECT username, password_verifier, totp_secret, enabled "
-                    "FROM users WHERE username = ?",
-                    (username,),
-                ).fetchone()
+            row = self._repository.user_row(username)
             if row is None:
                 raise IdentityNotFoundError("user is not available")
             return self._record_from_row(row)
@@ -218,13 +215,7 @@ class SqliteIdentityStore(IdentityStore):
         totp_secret = self._validate_totp_secret(totp_secret)
         try:
             verifier = self._password_hasher.hash(password)
-            with self._database.transaction() as connection:
-                connection.execute(
-                    "INSERT INTO users "
-                    "(username, password_verifier, totp_secret, enabled) "
-                    "VALUES (?, ?, ?, 1)",
-                    (username, verifier, totp_secret),
-                )
+            self._repository.insert_user(username, verifier, totp_secret)
         except IdentityStoreError:
             raise
         except Exception as exc:
@@ -235,10 +226,7 @@ class SqliteIdentityStore(IdentityStore):
 
     def list_users(self) -> tuple[UserSummary, ...]:
         try:
-            with self._database.read_connection() as connection:
-                rows = connection.execute(
-                    "SELECT username, enabled FROM users ORDER BY username",
-                ).fetchall()
+            rows = self._repository.user_rows()
             summaries: list[UserSummary] = []
             for username, enabled in rows:
                 validate_username(username)
@@ -310,8 +298,7 @@ class SqliteIdentityStore(IdentityStore):
     def create_group(self, name: str) -> None:
         name = validate_group_name(name)
         try:
-            with self._database.transaction() as connection:
-                connection.execute("INSERT INTO groups (name) VALUES (?)", (name,))
+            self._repository.create_group(name)
         except Exception as exc:
             if isinstance(exc, sqlite3.IntegrityError):
                 raise IdentityAlreadyExistsError("group already exists") from exc
@@ -319,10 +306,7 @@ class SqliteIdentityStore(IdentityStore):
 
     def list_groups(self) -> tuple[str, ...]:
         try:
-            with self._database.read_connection() as connection:
-                rows = connection.execute(
-                    "SELECT name FROM groups ORDER BY name",
-                ).fetchall()
+            rows = self._repository.group_rows()
             names = tuple(validate_group_name(row[0]) for row in rows)
             return names
         except IdentityStoreError as exc:
@@ -333,19 +317,9 @@ class SqliteIdentityStore(IdentityStore):
     def get_group_members(self, name: str) -> tuple[str, ...]:
         name = validate_group_name(name)
         try:
-            with self._database.read_connection() as connection:
-                if (
-                    connection.execute(
-                        "SELECT 1 FROM groups WHERE name = ?", (name,)
-                    ).fetchone()
-                    is None
-                ):
-                    raise IdentityNotFoundError("group is not available")
-                rows = connection.execute(
-                    "SELECT username FROM user_groups "
-                    "WHERE group_name = ? ORDER BY username",
-                    (name,),
-                ).fetchall()
+            if not self._repository.group_exists(name):
+                raise IdentityNotFoundError("group is not available")
+            rows = self._repository.group_membership_rows(name)
             members = tuple(validate_username(row[0]) for row in rows)
             if len(set(members)) != len(members):
                 raise IdentityDataError("group membership is duplicated")
@@ -360,19 +334,12 @@ class SqliteIdentityStore(IdentityStore):
     def remove_group(self, name: str) -> None:
         name = validate_group_name(name)
         try:
-            with self._database.transaction() as connection:
-                membership = connection.execute(
-                    "SELECT 1 FROM user_groups WHERE group_name = ? LIMIT 1",
-                    (name,),
-                ).fetchone()
-                if membership is not None:
-                    raise IdentityStoreError("group is not empty")
-                result = connection.execute(
-                    "DELETE FROM groups WHERE name = ?",
-                    (name,),
-                )
-                if result.rowcount != 1:
-                    raise IdentityNotFoundError("group is not available")
+            if not self._repository.group_exists(name):
+                raise IdentityNotFoundError("group is not available")
+            if self._repository.group_membership_rows(name):
+                raise IdentityStoreError("group is not empty")
+            if not self._repository.remove_group(name):
+                raise IdentityNotFoundError("group is not available")
         except IdentityStoreError:
             raise
         except Exception as exc:
@@ -390,33 +357,12 @@ class SqliteIdentityStore(IdentityStore):
 
     def _change_membership(self, group: str, username: str, *, add: bool) -> None:
         try:
-            with self._database.transaction() as connection:
-                if (
-                    connection.execute(
-                        "SELECT 1 FROM groups WHERE name = ?", (group,)
-                    ).fetchone()
-                    is None
-                ):
-                    raise IdentityNotFoundError("group is not available")
-                if (
-                    connection.execute(
-                        "SELECT 1 FROM users WHERE username = ?", (username,)
-                    ).fetchone()
-                    is None
-                ):
-                    raise IdentityNotFoundError("user is not available")
-                if add:
-                    connection.execute(
-                        "INSERT INTO user_groups (username, group_name) VALUES (?, ?)",
-                        (username, group),
-                    )
-                else:
-                    result = connection.execute(
-                        "DELETE FROM user_groups WHERE username = ? AND group_name = ?",
-                        (username, group),
-                    )
-                    if result.rowcount != 1:
-                        raise IdentityNotFoundError("membership is not available")
+            if not self._repository.group_exists(group):
+                raise IdentityNotFoundError("group is not available")
+            if self._repository.user_row(username) is None:
+                raise IdentityNotFoundError("user is not available")
+            if not self._repository.change_membership(group, username, add=add):
+                raise IdentityNotFoundError("membership is not available")
         except IdentityStoreError:
             raise
         except Exception as exc:
@@ -430,18 +376,9 @@ class SqliteIdentityStore(IdentityStore):
         assignment: str,
         values: Sequence[Any],
     ) -> None:
-        with self._database.transaction() as connection:
-            if (
-                connection.execute(
-                    "SELECT 1 FROM users WHERE username = ?", (username,)
-                ).fetchone()
-                is None
-            ):
-                raise IdentityNotFoundError("user is not available")
-            connection.execute(
-                f"UPDATE users SET {assignment} WHERE username = ?",
-                (*values, username),
-            )
+        if self._repository.user_row(username) is None:
+            raise IdentityNotFoundError("user is not available")
+        self._repository.update_user(username, assignment, values)
 
     def _record_from_row(self, row: Sequence[Any]) -> UserRecord:
         username, verifier, totp_secret, enabled = row
@@ -463,20 +400,11 @@ class SqliteIdentityStore(IdentityStore):
         )
 
     def _groups_for(self, username: str) -> tuple[str, ...]:
-        with self._database.read_connection() as connection:
-            rows = connection.execute(
-                "SELECT group_name FROM user_groups "
-                "WHERE username = ? ORDER BY group_name",
-                (username,),
-            ).fetchall()
+        rows = self._repository.user_group_rows(username)
         groups: list[str] = []
         for (group_name,) in rows:
             group_name = validate_group_name(group_name)
-            with self._database.read_connection() as connection:
-                group_exists = connection.execute(
-                    "SELECT 1 FROM groups WHERE name = ?", (group_name,)
-                ).fetchone()
-            if group_exists is None:
+            if not self._repository.group_exists(group_name):
                 raise IdentityDataError("group membership is malformed")
             if group_name in groups:
                 raise IdentityDataError("group membership is duplicated")
