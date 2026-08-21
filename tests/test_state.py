@@ -37,7 +37,7 @@ def test_state_database_persists_one_issuer_host_identity(tmp_path: Path) -> Non
         second.close()
 
 
-def test_state_database_creates_only_foundational_schema(tmp_path: Path) -> None:
+def test_state_database_creates_only_non_ca_schema(tmp_path: Path) -> None:
     """First service startup creates protected non-CA state."""
     database_path = tmp_path / "state.sqlite3"
 
@@ -51,9 +51,10 @@ def test_state_database_creates_only_foundational_schema(tmp_path: Path) -> None
             )
             == 0o600
         )
-        assert database.schema_version == 2
+        assert database.schema_version == 3
         assert "ski_schema" in database.table_names
         assert "ssh_host_keys" in database.table_names
+        assert {"users", "groups", "user_groups"} <= database.table_names
         assert "ca_keys" not in database.table_names
         assert "certificates" not in database.table_names
     finally:
@@ -68,7 +69,7 @@ def test_state_database_reopens_idempotently(tmp_path: Path) -> None:
     first.close()
     second = StateDatabase.open(database_path, owner=True)
     try:
-        assert second.schema_version == 2
+        assert second.schema_version == 3
     finally:
         second.close()
 
@@ -91,8 +92,9 @@ def test_state_database_migrates_foundation_to_host_key_schema(
 
     database = StateDatabase.open(database_path, owner=True)
     try:
-        assert database.schema_version == 2
+        assert database.schema_version == 3
         assert "ssh_host_keys" in database.table_names
+        assert {"users", "groups", "user_groups"} <= database.table_names
         assert database.host_key.fingerprint.startswith("SHA256:")
     finally:
         database.close()

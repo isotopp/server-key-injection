@@ -30,7 +30,7 @@ def test_service_runtime_starts_state_and_listener_before_ready_event(
         )
         await runtime.start()
         try:
-            assert runtime.state.schema_version == 2
+            assert runtime.state.schema_version == 3
             assert runtime.issuer.port > 0
             ready = sink.events[-1]
             assert ready.name == "service_ready"

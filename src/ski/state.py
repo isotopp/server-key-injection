@@ -12,7 +12,7 @@ from typing import TextIO, cast
 
 import asyncssh
 
-SUPPORTED_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -127,6 +127,19 @@ class StateDatabase:
                 except Exception:
                     connection.rollback()
                     raise
+                row = (2,)
+            if row[0] == 2:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    StateDatabase._create_identity_tables(connection)
+                    connection.execute(
+                        "UPDATE ski_schema SET version = ? WHERE singleton = 1",
+                        (SUPPORTED_SCHEMA_VERSION,),
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
                 return
             if row[0] != SUPPORTED_SCHEMA_VERSION:
                 raise StateError("state database schema version is unsupported")
@@ -145,6 +158,7 @@ class StateDatabase:
                 (SUPPORTED_SCHEMA_VERSION,),
             )
             StateDatabase._create_host_key_table(connection)
+            StateDatabase._create_identity_tables(connection)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -159,6 +173,27 @@ class StateDatabase:
             "private_key BLOB NOT NULL, "
             "public_key BLOB NOT NULL, "
             "fingerprint TEXT NOT NULL"
+            ")",
+        )
+
+    @staticmethod
+    def _create_identity_tables(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS users ("
+            "username TEXT PRIMARY KEY, "
+            "password_verifier TEXT NOT NULL, "
+            "totp_secret TEXT NOT NULL, "
+            "enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))"
+            ")",
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY)",
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS user_groups ("
+            "username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE, "
+            "group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE, "
+            "PRIMARY KEY (username, group_name)"
             ")",
         )
 
