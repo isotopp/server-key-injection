@@ -11,6 +11,8 @@ from pathlib import Path
 
 import asyncssh
 
+from ski.state import CAKeyRecord, StateDatabase, StateError
+
 
 class CAFileError(RuntimeError):
     """Raised when CA material cannot be created or validated safely."""
@@ -29,6 +31,53 @@ class GeneratedCAMaterial:
     private_bytes: bytes
     public_bytes: bytes
     fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedActiveCA:
+    """A configured CA whose files and persisted public record agree."""
+
+    record: CAKeyRecord
+    private_key: asyncssh.SSHKey
+    public_key: asyncssh.SSHKey
+
+
+def load_validated_active_ca(
+    database: StateDatabase,
+    *,
+    private_path: Path,
+    public_path: Path,
+) -> ValidatedActiveCA:
+    """Load and cross-check the configured private/public CA and state record."""
+    try:
+        private_key = asyncssh.import_private_key(private_path.read_bytes())
+        public_key = asyncssh.import_public_key(public_path.read_bytes())
+    except (OSError, asyncssh.KeyImportError) as exc:
+        raise StateError("active CA material is unavailable") from exc
+    except Exception as exc:
+        raise StateError("active CA material is invalid") from exc
+
+    if (
+        private_key.get_algorithm() != "ssh-ed25519"
+        or public_key.get_algorithm() != "ssh-ed25519"
+        or private_key.export_public_key() != public_key.export_public_key()
+    ):
+        raise StateError("active CA material does not match")
+    record = database.get_active_ca()
+    if record is None:
+        raise StateError("active CA record is unavailable")
+    if (
+        record.algorithm != "ssh-ed25519"
+        or record.public_key != public_key.export_public_key()
+        or record.fingerprint != private_key.get_fingerprint()
+        or record.private_key_path != private_path
+    ):
+        raise StateError("active CA record does not match configured material")
+    return ValidatedActiveCA(
+        record=record,
+        private_key=private_key,
+        public_key=public_key,
+    )
 
 
 def _run_ssh_keygen(

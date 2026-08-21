@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import asyncssh
 
+from ski.ca import ValidatedActiveCA
 from ski.identities import IdentitySnapshot, IdentityStore
 
 TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[str | None]]
@@ -198,6 +199,7 @@ class TracerIssuer:
         listener_factory: ListenerFactory | None = None,
         server_host_key: asyncssh.SSHKey | None = None,
         identity_store: IdentityStore | None = None,
+        active_ca: ValidatedActiveCA | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.bind = bind
@@ -205,6 +207,7 @@ class TracerIssuer:
         self.request_handler = request_handler
         self.authenticated_request_handler = authenticated_request_handler
         self.identity_store = identity_store
+        self.active_ca = active_ca
         self._clock = clock
         self._server_host_key = (
             asyncssh.generate_private_key("ssh-ed25519")

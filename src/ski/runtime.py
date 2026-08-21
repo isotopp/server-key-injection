@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncssh
 
+from ski.ca import ValidatedActiveCA, load_validated_active_ca
 from ski.configuration import (
     ConfigurationError,
     RuntimeConfiguration,
@@ -61,6 +62,7 @@ class ServiceRuntime:
         self._configuration: RuntimeConfiguration | None = None
         self._configuration_generation = 0
         self._state: StateDatabase | None = None
+        self._active_ca: ValidatedActiveCA | None = None
         self._issuer: TracerIssuer | None = None
         self._in_flight: set[asyncio.Task[Any]] = set()
         self._stopping = False
@@ -93,6 +95,13 @@ class ServiceRuntime:
         return self._issuer
 
     @property
+    def active_ca(self) -> ValidatedActiveCA:
+        """Return the validated persistent CA used by this runtime."""
+        if self._active_ca is None:
+            raise RuntimeError("service runtime is not started")
+        return self._active_ca
+
+    @property
     def configuration_generation(self) -> int:
         """Return the generation number of the active configuration."""
         return self._configuration_generation
@@ -113,6 +122,17 @@ class ServiceRuntime:
             state = self._state_opener(configuration.database, owner=True)
             self._state = state
             host_key = asyncssh.import_private_key(state.host_key.private_key)
+            if (
+                configuration.ca_private_key is None
+                or configuration.ca_public_key is None
+            ):
+                raise ConfigurationError("ordinary CA configuration is incomplete")
+            active_ca = load_validated_active_ca(
+                state,
+                private_path=configuration.ca_private_key,
+                public_path=configuration.ca_public_key,
+            )
+            self._active_ca = active_ca
             identity_store = SqliteIdentityStore(state)
             issuer = self._issuer_factory(
                 bind=configuration.bind,
@@ -121,6 +141,7 @@ class ServiceRuntime:
                 authenticated_request_handler=self._handle_authenticated_tracer_request,
                 server_host_key=host_key,
                 identity_store=identity_store,
+                active_ca=active_ca,
             )
             self._issuer = issuer
             await issuer.start()
@@ -168,6 +189,12 @@ class ServiceRuntime:
             )
             if candidate.database != self._configuration.database:
                 raise ConfigurationError("restart required for database path change")
+            if (
+                candidate.ca_private_key != self._configuration.ca_private_key
+                or candidate.ca_public_key != self._configuration.ca_public_key
+                or candidate.ca_krl != self._configuration.ca_krl
+            ):
+                raise ConfigurationError("restart required for CA path change")
         except Exception as exc:
             error_code = (
                 "restart_required"
@@ -217,6 +244,7 @@ class ServiceRuntime:
             if state is not None:
                 state.close()
             self._configuration = None
+            self._active_ca = None
             self._configuration_generation = 0
             self._emit("service_stopped", "ski shutdown complete")
             self._close_complete.set()
@@ -344,6 +372,7 @@ class ServiceRuntime:
     async def _cleanup_resources(self) -> None:
         issuer, self._issuer = self._issuer, None
         state, self._state = self._state, None
+        self._active_ca = None
         if issuer is not None:
             await issuer.close()
         if state is not None:

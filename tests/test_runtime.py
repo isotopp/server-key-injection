@@ -60,6 +60,78 @@ def test_service_runtime_rejects_missing_ordinary_ca_before_ready(
     asyncio.run(exercise())
 
 
+def test_service_runtime_exposes_the_validated_persistent_ca_before_ready(
+    tmp_path: Path,
+) -> None:
+    """A configured listener starts only with the persisted CA material."""
+    environment = runtime_environment(tmp_path, tmp_path / "state.sqlite3")
+
+    async def exercise() -> None:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment=environment,
+            event_sink=MemoryEventSink(),
+        )
+        await runtime.start()
+        try:
+            assert runtime.active_ca.record.fingerprint.startswith("SHA256:")
+            assert runtime.active_ca.private_key.get_algorithm() == "ssh-ed25519"
+        finally:
+            await runtime.close()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("broken", ["private", "public"])
+def test_service_runtime_rejects_missing_active_ca_material_before_ready(
+    tmp_path: Path,
+    broken: str,
+) -> None:
+    """A missing configured CA file prevents listener readiness."""
+    environment = runtime_environment(tmp_path, tmp_path / "state.sqlite3")
+    (tmp_path / ("user_ca" if broken == "private" else "user_ca.pub")).unlink()
+
+    async def exercise() -> None:
+        sink = MemoryEventSink()
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment=environment,
+            event_sink=sink,
+        )
+        with pytest.raises(StateError, match="active CA"):
+            await runtime.start()
+        assert sink.events[-1].name == "service_start_failed"
+        with pytest.raises(RuntimeError, match="not started"):
+            runtime.issuer
+
+    asyncio.run(exercise())
+
+
+def test_service_runtime_rejects_mismatched_active_ca_material(
+    tmp_path: Path,
+) -> None:
+    """A public/private mismatch never reaches listener startup."""
+    environment = runtime_environment(tmp_path, tmp_path / "state.sqlite3")
+    other_key = asyncssh.generate_private_key("ssh-ed25519")
+    (tmp_path / "user_ca.pub").write_bytes(other_key.export_public_key())
+
+    async def exercise() -> None:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment=environment,
+            event_sink=MemoryEventSink(),
+        )
+        with pytest.raises(StateError, match="does not match"):
+            await runtime.start()
+        with pytest.raises(RuntimeError, match="not started"):
+            runtime.issuer
+
+    asyncio.run(exercise())
+
+
 def test_service_runtime_starts_state_and_listener_before_ready_event(
     tmp_path: Path,
 ) -> None:
@@ -178,6 +250,7 @@ def test_runtime_reload_swaps_a_valid_configuration_snapshot(
     tmp_path: Path,
 ) -> None:
     """A valid reload advances the generation without moving the listener."""
+    runtime_environment(tmp_path, tmp_path / "state.sqlite3")
     (tmp_path / ".env").write_text(
         f"SKI_CA_DATABASE={tmp_path / 'state.sqlite3'}\n"
         f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
@@ -225,6 +298,7 @@ def test_runtime_reload_rejects_startup_only_changes_and_invalid_candidates(
 ) -> None:
     """Rejected reloads leave the complete previous snapshot active."""
     database_path = tmp_path / "state.sqlite3"
+    runtime_environment(tmp_path, database_path)
     (tmp_path / ".env").write_text(
         f"SKI_CA_DATABASE={database_path}\n"
         f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
@@ -272,6 +346,7 @@ def test_requests_keep_the_snapshot_with_which_they_started(
 ) -> None:
     """Requests retain their original snapshot across an accepted reload."""
     database_path = tmp_path / "state.sqlite3"
+    runtime_environment(tmp_path, database_path)
     (tmp_path / ".env").write_text(
         f"SKI_CA_DATABASE={database_path}\n"
         f"SKI_CA_PRIVATE_KEY={tmp_path / 'user_ca'}\n"
