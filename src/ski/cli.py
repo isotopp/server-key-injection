@@ -6,17 +6,21 @@ import argparse
 import asyncio
 import base64
 import getpass
-import re
 import secrets
 import sys
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
 import pyotp
 
 from ski.ca import CAFileError, CAFileWriter
+from ski.ca_commands import (
+    list_ca_events,
+    read_ca_public_key,
+    show_ca_records,
+    verify_ca_state,
+)
 from ski.configuration import ConfigurationError, load_runtime_configuration
 from ski.identities import (
     GroupAdministration,
@@ -27,9 +31,8 @@ from ski.identities import (
 from ski.identity_commands import list_users as list_identity_users
 from ski.identity_commands import show_user as show_identity_user
 from ski.notify import ServiceReloadNotifier
-from ski.policy import PolicyValidationError, validate_username
 from ski.runtime import ServiceRuntime
-from ski.state import EventRecord, StateDatabase, StateError
+from ski.state import StateDatabase, StateError
 
 
 def _port(value: str) -> int:
@@ -231,14 +234,8 @@ def _run_ca_init(
 
 def _run_ca_show(*, show_all: bool, output: TextIO) -> None:
     """Display redacted public CA status without notifying the daemon."""
-    database: StateDatabase | None = None
     try:
-        configuration = _ca_configuration()
-        database = StateDatabase.open(configuration.database)
-        records = database.list_ca_keys() if show_all else ()
-        if not show_all:
-            active = database.get_active_ca()
-            records = () if active is None else (active,)
+        records = show_ca_records(show_all=show_all)
         if not records:
             raise SystemExit("ski: no CA is initialized")
         for ca in records:
@@ -249,59 +246,17 @@ def _run_ca_show(*, show_all: bool, output: TextIO) -> None:
             print(f"Activated: {ca.activated_at}", file=output)
     except (ConfigurationError, StateError) as exc:
         raise SystemExit("ski: unable to show CA") from exc
-    finally:
-        if database is not None:
-            database.close()
 
 
 def _run_ca_public_key(*, fingerprint: str | None, output: TextIO) -> None:
     """Print one selected CA public key and no private metadata."""
-    database: StateDatabase | None = None
     try:
-        configuration = _ca_configuration()
-        database = StateDatabase.open(configuration.database)
-        records = database.list_ca_keys()
-        selected = (
-            next((ca for ca in records if ca.fingerprint == fingerprint), None)
-            if fingerprint is not None
-            else database.get_active_ca()
-        )
-        if selected is None:
+        public_key = read_ca_public_key(fingerprint=fingerprint)
+        if public_key is None:
             raise SystemExit("ski: requested CA is unavailable")
-        print(selected.public_key.decode("utf-8").rstrip(), file=output)
+        print(public_key, file=output)
     except (ConfigurationError, StateError, UnicodeError) as exc:
         raise SystemExit("ski: unable to read CA public key") from exc
-    finally:
-        if database is not None:
-            database.close()
-
-
-def _parse_log_serial(value: str | None) -> int | None:
-    if value is None:
-        return None
-    if not value.isascii() or not value.isdigit():
-        raise ValueError("serial filter is malformed")
-    serial = int(value)
-    if serial >= 2**64:
-        raise ValueError("serial filter is malformed")
-    return serial
-
-
-def _parse_log_time(value: str | None) -> int | None:
-    if value is None:
-        return None
-    if value.isascii() and value.isdigit():
-        return int(value)
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("time filter is malformed") from exc
-    if parsed.tzinfo is None:
-        raise ValueError("time filter must include a timezone")
-    timestamp = int(parsed.astimezone(UTC).timestamp())
-    if timestamp < 0:
-        raise ValueError("time filter is malformed")
-    return timestamp
 
 
 def _run_ca_log_list(
@@ -314,68 +269,27 @@ def _run_ca_log_list(
     output: TextIO,
 ) -> None:
     """Render a bounded, strictly filtered, redacted CA event view."""
-    database: StateDatabase | None = None
     try:
-        serial_value = _parse_log_serial(serial)
-        if user is not None:
-            try:
-                validate_username(user)
-            except PolicyValidationError as exc:
-                raise ValueError("user filter is malformed") from exc
-        if event is not None and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", event) is None:
-            raise ValueError("event filter is malformed")
-        from_value = _parse_log_time(from_time)
-        to_value = _parse_log_time(to_time)
-        if from_value is not None and to_value is not None and from_value > to_value:
-            raise ValueError("time filter range is malformed")
-        configuration = _ca_configuration()
-        database = StateDatabase.open(configuration.database)
-        events = database.list_events(
-            serial=serial_value,
-            identity=user,
-            kind=event,
-            from_time=from_value,
-            to_time=to_value,
-            limit=100,
+        events = list_ca_events(
+            serial=serial,
+            user=user,
+            event=event,
+            from_time=from_time,
+            to_time=to_time,
         )
-        for record in events:
-            print(_render_event(record), file=output)
+        for line in events:
+            print(line, file=output)
     except (ConfigurationError, StateError, ValueError) as exc:
         raise SystemExit("ski: unable to list CA log") from exc
-    finally:
-        if database is not None:
-            database.close()
-
-
-def _render_event(record: EventRecord) -> str:
-    """Render only fixed safe event fields."""
-    fields = [
-        str(record.event_id),
-        str(record.occurred_at),
-        record.kind,
-        record.decision,
-        f"request={record.request_id}",
-    ]
-    if record.identity is not None:
-        fields.append(f"user={record.identity}")
-    if record.serial is not None:
-        fields.append(f"serial={record.serial}")
-    return " ".join(fields)
 
 
 def _run_ca_log_verify(*, output: TextIO) -> None:
     """Verify CA state without mutating the database or notifying the daemon."""
-    database: StateDatabase | None = None
     try:
-        configuration = _ca_configuration()
-        database = StateDatabase.open(configuration.database)
-        database.verify_ca_state()
+        verify_ca_state()
         print("CA state verified.", file=output)
     except (ConfigurationError, StateError) as exc:
         raise SystemExit("ski: CA state verification failed") from exc
-    finally:
-        if database is not None:
-            database.close()
 
 
 def _open_identity_store() -> tuple[StateDatabase, SqliteIdentityStore]:
