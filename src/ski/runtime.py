@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -19,6 +18,7 @@ from ski.configuration import (
     RuntimeConfiguration,
     load_runtime_configuration,
 )
+from ski.control import RuntimeControl
 from ski.credentials import OrdinaryIssuanceService
 from ski.identities import IdentitySnapshot, SqliteIdentityStore
 from ski.injection import OrdinaryAgentInjector, TracerAgentInjector
@@ -79,9 +79,8 @@ class ServiceRuntime:
         self._stopping = False
         self._close_started = False
         self._close_complete = asyncio.Event()
-        self._shutdown_requested = asyncio.Event()
-        self._reload_requested = asyncio.Event()
         self._reload_lock = asyncio.Lock()
+        self._control = RuntimeControl()
         self._injector = TracerAgentInjector()
 
     @property
@@ -302,59 +301,26 @@ class ServiceRuntime:
 
     def request_shutdown(self) -> None:
         """Request foreground shutdown from a signal handler."""
-        self._shutdown_requested.set()
+        self._control.request_shutdown()
 
     def request_reload(self) -> None:
         """Request a serialized configuration reload from a signal handler."""
-        self._reload_requested.set()
+        self._control.request_reload()
 
     def install_signal_handlers(
         self,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> Callable[[], None]:
         """Install SIGTERM/SIGINT handlers and return their removal callback."""
-        event_loop = asyncio.get_running_loop() if loop is None else loop
-        installed: list[int] = []
-        signals = [signal.SIGTERM, signal.SIGINT]
-        if hasattr(signal, "SIGHUP"):
-            signals.append(signal.SIGHUP)
-        for signum in signals:
-            try:
-                callback = (
-                    self.request_reload
-                    if signum == signal.SIGHUP
-                    else self.request_shutdown
-                )
-                event_loop.add_signal_handler(signum, callback)
-            except (NotImplementedError, RuntimeError):
-                continue
-            installed.append(signum)
-
-        def remove_handlers() -> None:
-            for signum in installed:
-                event_loop.remove_signal_handler(signum)
-
-        return remove_handlers
+        return self._control.install_signal_handlers(loop)
 
     async def wait_for_shutdown(self) -> None:
         """Wait until a foreground shutdown signal has been requested."""
-        await self._shutdown_requested.wait()
+        await self._control.wait_for_shutdown()
 
     async def wait_for_control_event(self) -> str:
         """Wait for either a reload or terminal shutdown request."""
-        shutdown = asyncio.create_task(self._shutdown_requested.wait())
-        reload_request = asyncio.create_task(self._reload_requested.wait())
-        done, pending = await asyncio.wait(
-            (shutdown, reload_request),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        if shutdown in done:
-            return "shutdown"
-        self._reload_requested.clear()
-        return "reload"
+        return await self._control.wait_for_control_event()
 
     async def _handle_tracer_request(
         self,
