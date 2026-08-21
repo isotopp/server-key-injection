@@ -326,6 +326,71 @@ def test_state_database_creates_only_non_ca_schema(tmp_path: Path) -> None:
         database.close()
 
 
+def test_state_database_rejects_symlinked_database_path(tmp_path: Path) -> None:
+    """State opening never follows a symlinked database path."""
+    target = tmp_path / "target.sqlite3"
+    target.write_bytes(b"")
+    target.chmod(0o600)
+    database_path = tmp_path / "state.sqlite3"
+    database_path.symlink_to(target)
+
+    with pytest.raises(StateError, match="file"):
+        StateDatabase.open(database_path)
+
+
+def test_state_database_rejects_group_writable_existing_file(tmp_path: Path) -> None:
+    """State opening rejects an existing group-writable database."""
+    database_path = tmp_path / "state.sqlite3"
+    database_path.write_bytes(b"")
+    database_path.chmod(0o620)
+
+    with pytest.raises(StateError, match="unsafe"):
+        StateDatabase.open(database_path)
+
+
+def test_state_database_rejects_symlinked_owner_lock(tmp_path: Path) -> None:
+    """Daemon ownership never follows a symlinked lock file."""
+    database_path = tmp_path / "state.sqlite3"
+    database_path.write_bytes(b"")
+    database_path.chmod(0o600)
+    lock_target = tmp_path / "other.lock"
+    lock_target.write_bytes(b"")
+    lock_target.chmod(0o600)
+    database_path.with_name("state.sqlite3.lock").symlink_to(lock_target)
+
+    with pytest.raises(StateError, match="lock"):
+        StateDatabase.open(database_path, owner=True)
+
+
+def test_state_database_rejects_group_writable_owner_lock(tmp_path: Path) -> None:
+    """Daemon ownership rejects a group-writable lock file."""
+    database_path = tmp_path / "state.sqlite3"
+    database_path.write_bytes(b"")
+    database_path.chmod(0o600)
+    lock_path = database_path.with_name("state.sqlite3.lock")
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o620)
+
+    with pytest.raises(StateError, match="lock"):
+        StateDatabase.open(database_path, owner=True)
+
+
+def test_state_database_releases_lock_when_database_validation_fails(
+    tmp_path: Path,
+) -> None:
+    """A failed database check does not strand daemon ownership."""
+    database_path = tmp_path / "state.sqlite3"
+    database_path.write_bytes(b"")
+    database_path.chmod(0o620)
+
+    with pytest.raises(StateError, match="database"):
+        StateDatabase.open(database_path, owner=True)
+
+    database_path.chmod(0o600)
+    database = StateDatabase.open(database_path, owner=True)
+    database.close()
+
+
 def test_state_schema_contains_only_current_demo_tables(tmp_path: Path) -> None:
     """The current schema has no revocation or production-host tables."""
     database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)

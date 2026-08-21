@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -32,6 +33,7 @@ from ski.policy import (
     validate_principals,
     validate_username,
 )
+from ski.secure_files import SecureFileError, validate_secure_file
 
 SUPPORTED_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 _SERIAL_MAX = 2**64 - 1
@@ -234,9 +236,12 @@ class StateDatabase:
 
         connection: sqlite3.Connection | None = None
         try:
+            if path.is_symlink():
+                raise StateError("state database file is unsafe")
             existed = path.exists()
             if not existed:
                 path.touch(mode=0o600)
+            cls._validate_state_file(path)
             path.chmod(0o600)
             connection = sqlite3.connect(path, timeout=5.0, isolation_level=None)
             connection.execute("PRAGMA foreign_keys = ON")
@@ -252,9 +257,35 @@ class StateDatabase:
         return cls(path=path, connection=connection, lock_file=lock_file)
 
     @staticmethod
+    def _validate_state_file(path: Path) -> None:
+        """Validate one existing database file against the service account."""
+        try:
+            validate_secure_file(
+                path,
+                owner_uid=os.geteuid(),
+                group_gid=os.getegid(),
+            )
+        except SecureFileError as exc:
+            raise StateError("state database file is unsafe") from exc
+
+    @staticmethod
     def _acquire_lock(path: Path) -> TextIO:
         lock_path = path.with_name(f"{path.name}.lock")
-        lock_path.touch(mode=0o600, exist_ok=True)
+        if lock_path.is_symlink():
+            raise StateError("state lock file is unsafe")
+        created = not lock_path.exists()
+        try:
+            if created:
+                lock_path.touch(mode=0o600)
+            validate_secure_file(
+                lock_path,
+                owner_uid=os.geteuid(),
+                group_gid=os.getegid(),
+            )
+        except SecureFileError as exc:
+            if created:
+                lock_path.unlink(missing_ok=True)
+            raise StateError("state lock file is unsafe") from exc
         lock_path.chmod(0o600)
         lock_file = lock_path.open("r+")
         try:
