@@ -15,27 +15,8 @@ from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
 from ski.state import StateDatabase
+from support import MfaClient as _MfaClient
 from support import runtime_environment
-
-
-class _MfaClient(asyncssh.SSHClient):
-    def __init__(self, password: str, code: str) -> None:
-        self.password = password
-        self.code = code
-        self.prompts: tuple[str, ...] = ()
-
-    def kbdint_auth_requested(self) -> str:
-        return ""
-
-    def kbdint_challenge_received(
-        self,
-        name: str,
-        instructions: str,
-        lang: str,
-        prompts: Sequence[tuple[str, bool]],
-    ) -> list[str]:
-        self.prompts = tuple(prompt for prompt, _ in prompts)
-        return [self.password, self.code]
 
 
 def test_enabled_user_is_admitted_by_password_and_totp_challenge(

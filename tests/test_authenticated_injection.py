@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from collections.abc import Sequence
 from pathlib import Path
 
 import asyncssh
@@ -18,7 +17,8 @@ from ski.journal import Event, MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
 from ski.state import StateDatabase
-from support import runtime_environment
+from support import MfaClient as _MfaClient
+from support import mfa_client_factory, runtime_environment
 
 
 async def _start_test_agent() -> dict[str, str]:
@@ -54,24 +54,6 @@ async def _stop_test_agent(environment: dict[str, str]) -> None:
     Path(environment["SSH_AUTH_SOCK"]).unlink(missing_ok=True)
 
 
-class _MfaClient(asyncssh.SSHClient):
-    def __init__(self, password: str, code: str) -> None:
-        self.password = password
-        self.code = code
-
-    def kbdint_auth_requested(self) -> str:
-        return ""
-
-    def kbdint_challenge_received(
-        self,
-        name: str,
-        instructions: str,
-        lang: str,
-        prompts: Sequence[tuple[str, bool]],
-    ) -> list[str]:
-        return [self.password, self.code]
-
-
 def test_authenticated_forwarded_request_injects_dummy_identity_and_groups(
     tmp_path: Path,
 ) -> None:
@@ -100,9 +82,8 @@ def test_authenticated_forwarded_request_injects_dummy_identity_and_groups(
                     known_hosts=None,
                     agent_path=agent_environment["SSH_AUTH_SOCK"],
                     agent_forwarding=True,
-                    client_factory=lambda: _MfaClient(
-                        "password",
-                        pyotp.TOTP(user.totp_secret).now(),
+                    client_factory=mfa_client_factory(
+                        "password", pyotp.TOTP(user.totp_secret).now()
                     ),
                     kbdint_auth=True,
                 ) as connection:

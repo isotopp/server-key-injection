@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from support import ssh_agent
+from support import mfa_client_factory, ssh_agent
 
 
 def test_ssh_agent_context_exposes_socket_and_cleans_up() -> None:
@@ -22,6 +22,20 @@ def test_ssh_agent_context_exposes_socket_and_cleans_up() -> None:
         assert not socket_path.exists()
 
     asyncio.run(exercise())
+
+
+def test_mfa_client_factory_answers_and_records_prompts() -> None:
+    """The shared MFA client supplies factors and records challenge labels."""
+    client = mfa_client_factory("password", "123456")()
+
+    assert client.kbdint_auth_requested() == ""
+    assert client.kbdint_challenge_received(
+        "",
+        "",
+        "",
+        [("Password:", True), ("2FA:", False)],
+    ) == ["password", "123456"]
+    assert client.prompts == ("Password:", "2FA:")
 
 
 def test_ssh_agent_context_cleans_up_when_scenario_raises() -> None:

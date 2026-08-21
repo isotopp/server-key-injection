@@ -5,12 +5,39 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncssh
+
 from ski.ca import CAFileWriter
 from ski.state import StateDatabase
+
+
+class MfaClient(asyncssh.SSHClient):
+    def __init__(self, password: str, code: str) -> None:
+        self.password = password
+        self.code = code
+        self.prompts: tuple[str, ...] = ()
+
+    def kbdint_auth_requested(self) -> str:
+        return ""
+
+    def kbdint_challenge_received(
+        self,
+        name: str,
+        instructions: str,
+        lang: str,
+        prompts: Sequence[tuple[str, bool]],
+    ) -> list[str]:
+        self.prompts = tuple(prompt for prompt, _ in prompts)
+        return [self.password, self.code]
+
+
+def mfa_client_factory(password: str, code: str) -> Callable[[], MfaClient]:
+    """Return an AsyncSSH client factory answering the two MFA prompts."""
+    return lambda: MfaClient(password, code)
 
 
 @asynccontextmanager
