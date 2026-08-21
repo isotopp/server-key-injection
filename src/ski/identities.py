@@ -191,11 +191,12 @@ class SqliteIdentityStore(IdentityStore):
     def get_user(self, username: str) -> UserRecord:
         username = validate_username(username)
         try:
-            row = self._database._connection.execute(  # noqa: SLF001
-                "SELECT username, password_verifier, totp_secret, enabled "
-                "FROM users WHERE username = ?",
-                (username,),
-            ).fetchone()
+            with self._database.read_connection() as connection:
+                row = connection.execute(
+                    "SELECT username, password_verifier, totp_secret, enabled "
+                    "FROM users WHERE username = ?",
+                    (username,),
+                ).fetchone()
             if row is None:
                 raise IdentityNotFoundError("user is not available")
             return self._record_from_row(row)
@@ -234,9 +235,10 @@ class SqliteIdentityStore(IdentityStore):
 
     def list_users(self) -> tuple[UserSummary, ...]:
         try:
-            rows = self._database._connection.execute(  # noqa: SLF001
-                "SELECT username, enabled FROM users ORDER BY username",
-            ).fetchall()
+            with self._database.read_connection() as connection:
+                rows = connection.execute(
+                    "SELECT username, enabled FROM users ORDER BY username",
+                ).fetchall()
             summaries: list[UserSummary] = []
             for username, enabled in rows:
                 validate_username(username)
@@ -317,9 +319,10 @@ class SqliteIdentityStore(IdentityStore):
 
     def list_groups(self) -> tuple[str, ...]:
         try:
-            rows = self._database._connection.execute(  # noqa: SLF001
-                "SELECT name FROM groups ORDER BY name",
-            ).fetchall()
+            with self._database.read_connection() as connection:
+                rows = connection.execute(
+                    "SELECT name FROM groups ORDER BY name",
+                ).fetchall()
             names = tuple(validate_group_name(row[0]) for row in rows)
             return names
         except IdentityStoreError as exc:
@@ -330,18 +333,19 @@ class SqliteIdentityStore(IdentityStore):
     def get_group_members(self, name: str) -> tuple[str, ...]:
         name = validate_group_name(name)
         try:
-            if (
-                self._database._connection.execute(  # noqa: SLF001
-                    "SELECT 1 FROM groups WHERE name = ?", (name,)
-                ).fetchone()
-                is None
-            ):
-                raise IdentityNotFoundError("group is not available")
-            rows = self._database._connection.execute(  # noqa: SLF001
-                "SELECT username FROM user_groups "
-                "WHERE group_name = ? ORDER BY username",
-                (name,),
-            ).fetchall()
+            with self._database.read_connection() as connection:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM groups WHERE name = ?", (name,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise IdentityNotFoundError("group is not available")
+                rows = connection.execute(
+                    "SELECT username FROM user_groups "
+                    "WHERE group_name = ? ORDER BY username",
+                    (name,),
+                ).fetchall()
             members = tuple(validate_username(row[0]) for row in rows)
             if len(set(members)) != len(members):
                 raise IdentityDataError("group membership is duplicated")
@@ -459,19 +463,20 @@ class SqliteIdentityStore(IdentityStore):
         )
 
     def _groups_for(self, username: str) -> tuple[str, ...]:
-        rows = self._database._connection.execute(  # noqa: SLF001
-            "SELECT group_name FROM user_groups WHERE username = ? ORDER BY group_name",
-            (username,),
-        ).fetchall()
+        with self._database.read_connection() as connection:
+            rows = connection.execute(
+                "SELECT group_name FROM user_groups "
+                "WHERE username = ? ORDER BY group_name",
+                (username,),
+            ).fetchall()
         groups: list[str] = []
         for (group_name,) in rows:
             group_name = validate_group_name(group_name)
-            if (
-                self._database._connection.execute(  # noqa: SLF001
+            with self._database.read_connection() as connection:
+                group_exists = connection.execute(
                     "SELECT 1 FROM groups WHERE name = ?", (group_name,)
                 ).fetchone()
-                is None
-            ):
+            if group_exists is None:
                 raise IdentityDataError("group membership is malformed")
             if group_name in groups:
                 raise IdentityDataError("group membership is duplicated")

@@ -333,6 +333,18 @@ def test_state_database_reopens_idempotently(tmp_path: Path) -> None:
         second.close()
 
 
+def test_state_database_exposes_a_public_read_unit_of_work(tmp_path: Path) -> None:
+    """A caller can query state without reaching into private connection state."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        with database.read_connection() as connection:
+            assert connection.execute(
+                "SELECT version FROM ski_schema WHERE singleton = 1",
+            ).fetchone() == (4,)
+    finally:
+        database.close()
+
+
 def test_state_database_rejects_foundation_schema(
     tmp_path: Path,
 ) -> None:

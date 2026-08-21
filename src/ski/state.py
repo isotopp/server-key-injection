@@ -915,6 +915,11 @@ class StateDatabase:
         else:
             self._connection.commit()
 
+    @contextmanager
+    def read_connection(self) -> Iterator[sqlite3.Connection]:
+        """Expose a read-only query boundary without exposing private state."""
+        yield self._connection
+
     def close(self) -> None:
         """Close the database and release daemon ownership idempotently."""
         connection = self._connection
