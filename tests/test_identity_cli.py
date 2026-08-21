@@ -8,6 +8,7 @@ from pathlib import Path
 import pyotp
 import pytest
 
+import ski.cli as cli_module
 from ski.cli import build_parser, main
 from ski.identities import SqliteIdentityStore
 from ski.notify import ServiceManagerError, ServiceReloadNotifier
@@ -127,6 +128,36 @@ def test_user_show_and_list_are_redacted_read_only_views(
     assert "ops" not in list_text
     assert secret not in list_text
     assert verifier not in list_text
+
+
+def test_user_mutation_requires_optional_administration_capability(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A read-only backend is rejected before a user mutation or notification."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+
+        class ReadOnlyBackend:
+            pass
+
+        monkeypatch.setattr(
+            cli_module,
+            "_open_identity_store",
+            lambda: (database, ReadOnlyBackend()),
+        )
+        manager = _CountingServiceManager()
+
+        with pytest.raises(SystemExit, match="user status change failed"):
+            main(
+                ["user", "enable", "alice"],
+                notifier=ServiceReloadNotifier(manager),
+                output=io.StringIO(),
+            )
+
+        assert manager.reload_calls == 0
+    finally:
+        database.close()
 
 
 def test_user_add_commits_before_notification_and_succeeds_when_service_stopped(

@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import pyotp
 from argon2 import PasswordHasher
@@ -90,6 +90,7 @@ class UserDetail:
     groups: tuple[str, ...]
 
 
+@runtime_checkable
 class IdentityAuthenticator(Protocol):
     """Issuer capability for verifying the two existing authentication factors."""
 
@@ -100,6 +101,7 @@ class IdentityAuthenticator(Protocol):
         """Return whether the TOTP code is valid under backend policy."""
 
 
+@runtime_checkable
 class CanonicalIdentityLookup(Protocol):
     """Issuer capability for binding an input name to one canonical identity."""
 
@@ -107,6 +109,7 @@ class CanonicalIdentityLookup(Protocol):
         """Return the canonical identity or raise a safe identity-store error."""
 
 
+@runtime_checkable
 class GroupSnapshotProvider(Protocol):
     """Issuer capability for obtaining current groups after authentication."""
 
@@ -121,6 +124,40 @@ class IssuerIdentityProvider(
     Protocol,
 ):
     """Combined narrow read-only capability required by the SSH issuer."""
+
+
+@runtime_checkable
+class UserAdministration(Protocol):
+    """Optional demo capability for mutating user credentials and status."""
+
+    def create_user(self, username: str, password: str, totp_secret: str) -> UserRecord:
+        """Create one enabled demo user."""
+
+    def set_user_enabled(self, username: str, enabled: bool) -> UserRecord:
+        """Change one user's enabled state."""
+
+    def replace_password(self, username: str, password: str) -> UserRecord:
+        """Replace one user's password verifier."""
+
+    def replace_totp_secret(self, username: str, totp_secret: str) -> UserRecord:
+        """Replace one user's TOTP secret."""
+
+
+@runtime_checkable
+class GroupAdministration(Protocol):
+    """Optional demo capability for mutating groups and memberships."""
+
+    def create_group(self, name: str) -> None:
+        """Create one group."""
+
+    def remove_group(self, name: str) -> None:
+        """Remove one empty group."""
+
+    def add_membership(self, group: str, username: str) -> None:
+        """Add one group membership."""
+
+    def remove_membership(self, group: str, username: str) -> None:
+        """Remove one group membership."""
 
 
 class IdentityStore(ABC):

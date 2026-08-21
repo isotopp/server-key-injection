@@ -18,7 +18,12 @@ import pyotp
 
 from ski.ca import CAFileError, CAFileWriter
 from ski.configuration import ConfigurationError, load_runtime_configuration
-from ski.identities import IdentityStoreError, SqliteIdentityStore
+from ski.identities import (
+    GroupAdministration,
+    IdentityStoreError,
+    SqliteIdentityStore,
+    UserAdministration,
+)
 from ski.notify import ServiceReloadNotifier
 from ski.policy import PolicyValidationError, validate_username
 from ski.runtime import ServiceRuntime
@@ -382,6 +387,20 @@ def _open_identity_store() -> tuple[StateDatabase, SqliteIdentityStore]:
     return database, SqliteIdentityStore(database)
 
 
+def _require_user_administration(store: object) -> UserAdministration:
+    """Require the optional demo user mutation capability before any work."""
+    if not isinstance(store, UserAdministration):
+        raise IdentityStoreError("user administration is unavailable")
+    return store
+
+
+def _require_group_administration(store: object) -> GroupAdministration:
+    """Require the optional demo group mutation capability before any work."""
+    if not isinstance(store, GroupAdministration):
+        raise IdentityStoreError("group administration is unavailable")
+    return store
+
+
 def _run_user_add(
     username: str,
     *,
@@ -391,9 +410,10 @@ def _run_user_add(
 ) -> None:
     database, store = _open_identity_store()
     try:
+        administration = _require_user_administration(store)
         password = secret_reader("Password: ")
         totp_secret = _new_totp_secret()
-        user = store.create_user(username, password, totp_secret)
+        user = administration.create_user(username, password, totp_secret)
         notification = notifier.notify_after_mutation()
         uri = pyotp.TOTP(user.totp_secret).provisioning_uri(
             name=user.username,
@@ -456,7 +476,8 @@ def _run_user_status(
     """Change one user's enabled state and notify after commit."""
     database, store = _open_identity_store()
     try:
-        user = store.set_user_enabled(username, enabled)
+        administration = _require_user_administration(store)
+        user = administration.set_user_enabled(username, enabled)
         notification = notifier.notify_after_mutation()
         status = "enabled" if user.enabled else "disabled"
         print(f"User {user.username} is {status}.", file=output)
@@ -485,8 +506,9 @@ def _run_user_password_set(
     """Replace one password through concealed input and notify after commit."""
     database, store = _open_identity_store()
     try:
+        administration = _require_user_administration(store)
         password = secret_reader("New password: ")
-        user = store.replace_password(username, password)
+        user = administration.replace_password(username, password)
         notification = notifier.notify_after_mutation()
         print(f"Password updated: {user.username}", file=output)
         if not notification.succeeded:
@@ -514,7 +536,8 @@ def _run_user_totp_regenerate(
     """Replace one TOTP secret and display its enrollment material once."""
     database, store = _open_identity_store()
     try:
-        user = store.replace_totp_secret(username, _new_totp_secret())
+        administration = _require_user_administration(store)
+        user = administration.replace_totp_secret(username, _new_totp_secret())
         notification = notifier.notify_after_mutation()
         uri = pyotp.TOTP(user.totp_secret).provisioning_uri(
             name=user.username,
@@ -547,7 +570,8 @@ def _run_group_add(
     """Create one group and notify after the committed mutation."""
     database, store = _open_identity_store()
     try:
-        store.create_group(name)
+        administration = _require_group_administration(store)
+        administration.create_group(name)
         notification = notifier.notify_after_mutation()
         print(f"Group created: {name}", file=output)
         if not notification.succeeded:
@@ -596,7 +620,8 @@ def _run_group_remove(
     """Remove an empty group and notify after commit."""
     database, store = _open_identity_store()
     try:
-        store.remove_group(name)
+        administration = _require_group_administration(store)
+        administration.remove_group(name)
         notification = notifier.notify_after_mutation()
         print(f"Group removed: {name}", file=output)
         if not notification.succeeded:
@@ -621,11 +646,12 @@ def _run_group_membership(
     """Change one membership edge and notify after commit."""
     database, store = _open_identity_store()
     try:
+        administration = _require_group_administration(store)
         if add:
-            store.add_membership(group, username)
+            administration.add_membership(group, username)
             action = "added"
         else:
-            store.remove_membership(group, username)
+            administration.remove_membership(group, username)
             action = "removed"
         notification = notifier.notify_after_mutation()
         print(f"Membership {action}: {group} {username}", file=output)
