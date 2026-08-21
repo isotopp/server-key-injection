@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import fcntl
+import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO, cast
 
 import asyncssh
 
-SUPPORTED_SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSION = 4
+ORDINARY_CERTIFICATE_LIFETIME = 25 * 60 * 60
+_SERIAL_MAX = 2**64 - 1
+_IDENTITY_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,49 @@ class HostKeyMaterial:
     fingerprint: str
 
 
+@dataclass(frozen=True, slots=True)
+class CAKeyRecord:
+    """Public metadata for one persisted user-CA record."""
+
+    ca_id: int
+    algorithm: str
+    public_key: bytes
+    fingerprint: str
+    private_key_path: Path
+    activated_at: int
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class CertificateRecord:
+    """Safe metadata for one ordinary certificate issuance attempt."""
+
+    certificate_id: int
+    ca_id: int
+    serial: int
+    identity: str
+    public_key_fingerprint: str
+    principals: tuple[str, ...]
+    valid_after: int
+    valid_before: int
+    request_id: str
+    outcome: str
+
+
+@dataclass(frozen=True, slots=True)
+class EventRecord:
+    """One append-only, secret-free CA event."""
+
+    event_id: int
+    occurred_at: int
+    kind: str
+    decision: str
+    request_id: str
+    identity: str | None
+    ca_id: int | None
+    serial: int | None
+
+
 class StateError(RuntimeError):
     """Base error for local service state failures."""
 
@@ -35,6 +84,66 @@ class StateOwnershipError(StateError):
 
 class UnsupportedSchemaError(StateError):
     """Raised when a database requires a newer schema than this service knows."""
+
+
+def _timestamp(value: int | float | datetime | None) -> int:
+    if value is None:
+        return int(datetime.now(UTC).timestamp())
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise StateError("timestamp must include a timezone")
+        return int(value.astimezone(UTC).timestamp())
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StateError("timestamp is malformed")
+    result = int(value)
+    if result < 0:
+        raise StateError("timestamp is malformed")
+    return result
+
+
+def _validate_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise StateError(f"{label} is malformed")
+    return value
+
+
+def _validate_positive_id(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise StateError(f"{label} is malformed")
+    return value
+
+
+def _validate_serial(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StateError("certificate serial is malformed")
+    if not 0 <= value <= _SERIAL_MAX:
+        raise StateError("certificate serial is outside the 64-bit range")
+    return value
+
+
+def _validate_identity(value: object) -> str:
+    if not isinstance(value, str) or _IDENTITY_PATTERN.fullmatch(value) is None:
+        raise StateError("identity is not canonical")
+    return value
+
+
+def _validate_principals(value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple) or not value:
+        raise StateError("certificate principals are malformed")
+    if any(
+        not isinstance(principal, str) or not principal or "\x00" in principal
+        for principal in value
+    ):
+        raise StateError("certificate principals are malformed")
+    if len(set(value)) != len(value):
+        raise StateError("certificate principals contain duplicates")
+    return value
+
+
+def _validate_outcome(value: object) -> str:
+    if value not in {"success", "failed"}:
+        raise StateError("certificate outcome is malformed")
+    return cast(str, value)
 
 
 class StateDatabase:
@@ -121,7 +230,7 @@ class StateDatabase:
                     StateDatabase._create_host_key_table(connection)
                     connection.execute(
                         "UPDATE ski_schema SET version = ? WHERE singleton = 1",
-                        (SUPPORTED_SCHEMA_VERSION,),
+                        (2,),
                     )
                     connection.commit()
                 except Exception:
@@ -132,6 +241,19 @@ class StateDatabase:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     StateDatabase._create_identity_tables(connection)
+                    connection.execute(
+                        "UPDATE ski_schema SET version = ? WHERE singleton = 1",
+                        (3,),
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                row = (3,)
+            if row[0] == 3:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    StateDatabase._create_ca_tables(connection)
                     connection.execute(
                         "UPDATE ski_schema SET version = ? WHERE singleton = 1",
                         (SUPPORTED_SCHEMA_VERSION,),
@@ -159,6 +281,7 @@ class StateDatabase:
             )
             StateDatabase._create_host_key_table(connection)
             StateDatabase._create_identity_tables(connection)
+            StateDatabase._create_ca_tables(connection)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -195,6 +318,61 @@ class StateDatabase:
             "group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE, "
             "PRIMARY KEY (username, group_name)"
             ")",
+        )
+
+    @staticmethod
+    def _create_ca_tables(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS ca_keys ("
+            "ca_id INTEGER PRIMARY KEY, "
+            "algorithm TEXT NOT NULL CHECK (algorithm = 'ssh-ed25519'), "
+            "public_key BLOB NOT NULL, "
+            "fingerprint TEXT NOT NULL UNIQUE, "
+            "private_key_path TEXT NOT NULL, "
+            "activated_at INTEGER NOT NULL, "
+            "status TEXT NOT NULL CHECK (status IN ('active', 'retired'))"
+            ")",
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ca_keys_one_active "
+            "ON ca_keys (status) WHERE status = 'active'",
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS certificates ("
+            "certificate_id INTEGER PRIMARY KEY, "
+            "ca_id INTEGER NOT NULL REFERENCES ca_keys(ca_id), "
+            "serial TEXT NOT NULL, "
+            "identity TEXT NOT NULL, "
+            "public_key_fingerprint TEXT NOT NULL, "
+            "principals TEXT NOT NULL, "
+            "valid_after INTEGER NOT NULL, "
+            "valid_before INTEGER NOT NULL, "
+            "request_id TEXT NOT NULL, "
+            "outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failed')), "
+            "UNIQUE (ca_id, serial)"
+            ")",
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS events ("
+            "event_id INTEGER PRIMARY KEY, "
+            "occurred_at INTEGER NOT NULL, "
+            "kind TEXT NOT NULL, "
+            "decision TEXT NOT NULL, "
+            "request_id TEXT NOT NULL, "
+            "identity TEXT, "
+            "ca_id INTEGER REFERENCES ca_keys(ca_id), "
+            "serial TEXT"
+            ")",
+        )
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS events_no_update "
+            "BEFORE UPDATE ON events BEGIN "
+            "SELECT RAISE(ABORT, 'events are append-only'); END",
+        )
+        connection.execute(
+            "CREATE TRIGGER IF NOT EXISTS events_no_delete "
+            "BEFORE DELETE ON events BEGIN "
+            "SELECT RAISE(ABORT, 'events are append-only'); END",
         )
 
     @property
@@ -283,6 +461,352 @@ class StateDatabase:
             "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
         )
         return frozenset(row[0] for row in rows)
+
+    def register_active_ca(
+        self,
+        *,
+        public_key: bytes,
+        fingerprint: str,
+        private_key_path: Path,
+        activated_at: int | float | datetime | None = None,
+    ) -> CAKeyRecord:
+        """Register one validated active Ed25519 CA without private material."""
+        key = self._validate_ca_public_key(public_key, fingerprint)
+        path = self._validate_private_key_path(private_key_path)
+        timestamp = _timestamp(activated_at)
+        try:
+            with self.transaction() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO ca_keys "
+                    "(algorithm, public_key, fingerprint, private_key_path, "
+                    "activated_at, status) VALUES (?, ?, ?, ?, ?, 'active')",
+                    (
+                        key.get_algorithm(),
+                        key.export_public_key(),
+                        fingerprint,
+                        str(path),
+                        timestamp,
+                    ),
+                )
+                ca_id = cursor.lastrowid
+        except sqlite3.IntegrityError as exc:
+            raise StateError("an active CA is already registered") from exc
+        if ca_id is None:
+            raise StateError("active CA registration did not return an id")
+        return CAKeyRecord(
+            ca_id=int(ca_id),
+            algorithm=key.get_algorithm(),
+            public_key=key.export_public_key(),
+            fingerprint=fingerprint,
+            private_key_path=path,
+            activated_at=timestamp,
+            status="active",
+        )
+
+    def get_active_ca(self) -> CAKeyRecord | None:
+        """Return the validated active public CA record, if one exists."""
+        row = self._connection.execute(
+            "SELECT ca_id, algorithm, public_key, fingerprint, private_key_path, "
+            "activated_at, status FROM ca_keys WHERE status = 'active'",
+        ).fetchone()
+        if row is None:
+            return None
+        return self._ca_record_from_row(row)
+
+    def list_ca_keys(self) -> tuple[CAKeyRecord, ...]:
+        """Return all validated CA records in stable activation order."""
+        rows = self._connection.execute(
+            "SELECT ca_id, algorithm, public_key, fingerprint, private_key_path, "
+            "activated_at, status FROM ca_keys ORDER BY activated_at, ca_id",
+        ).fetchall()
+        return tuple(self._ca_record_from_row(row) for row in rows)
+
+    def record_certificate(
+        self,
+        *,
+        ca_id: int,
+        serial: int,
+        identity: str,
+        public_key_fingerprint: str,
+        principals: tuple[str, ...],
+        valid_after: int,
+        valid_before: int,
+        request_id: str,
+        outcome: str,
+    ) -> CertificateRecord:
+        """Append one safe certificate issuance record."""
+        _validate_positive_id(ca_id, "ca_id")
+        serial = _validate_serial(serial)
+        identity = _validate_identity(identity)
+        public_key_fingerprint = _validate_text(
+            public_key_fingerprint,
+            "public key fingerprint",
+        )
+        principals = _validate_principals(principals)
+        if (
+            isinstance(valid_after, bool)
+            or isinstance(valid_before, bool)
+            or not isinstance(valid_after, int)
+            or not isinstance(valid_before, int)
+            or valid_before - valid_after != ORDINARY_CERTIFICATE_LIFETIME
+        ):
+            raise StateError("certificate validity interval is not 25 hours")
+        request_id = _validate_text(request_id, "request id")
+        outcome = _validate_outcome(outcome)
+        encoded_principals = json.dumps(list(principals), separators=(",", ":"))
+        try:
+            with self.transaction() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO certificates "
+                    "(ca_id, serial, identity, public_key_fingerprint, principals, "
+                    "valid_after, valid_before, request_id, outcome) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        ca_id,
+                        str(serial),
+                        identity,
+                        public_key_fingerprint,
+                        encoded_principals,
+                        valid_after,
+                        valid_before,
+                        request_id,
+                        outcome,
+                    ),
+                )
+                certificate_id = cursor.lastrowid
+        except sqlite3.IntegrityError as exc:
+            raise StateError("certificate serial is already recorded") from exc
+        if certificate_id is None:
+            raise StateError("certificate record did not return an id")
+        return CertificateRecord(
+            certificate_id=int(certificate_id),
+            ca_id=ca_id,
+            serial=serial,
+            identity=identity,
+            public_key_fingerprint=public_key_fingerprint,
+            principals=principals,
+            valid_after=valid_after,
+            valid_before=valid_before,
+            request_id=request_id,
+            outcome=outcome,
+        )
+
+    def list_certificates(self) -> tuple[CertificateRecord, ...]:
+        """Return validated certificate metadata in insertion order."""
+        rows = self._connection.execute(
+            "SELECT certificate_id, ca_id, serial, identity, "
+            "public_key_fingerprint, principals, valid_after, valid_before, "
+            "request_id, outcome FROM certificates ORDER BY certificate_id",
+        ).fetchall()
+        return tuple(self._certificate_record_from_row(row) for row in rows)
+
+    def record_event(
+        self,
+        *,
+        kind: str,
+        decision: str,
+        request_id: str,
+        occurred_at: int | float | datetime | None = None,
+        identity: str | None = None,
+        ca_id: int | None = None,
+        serial: int | None = None,
+    ) -> EventRecord:
+        """Append one validated, secret-free CA event."""
+        kind = _validate_text(kind, "event kind")
+        decision = _validate_text(decision, "event decision")
+        request_id = _validate_text(request_id, "request id")
+        if identity is not None:
+            identity = _validate_identity(identity)
+        if ca_id is not None:
+            _validate_positive_id(ca_id, "ca_id")
+        if serial is not None:
+            serial = _validate_serial(serial)
+        timestamp = _timestamp(occurred_at)
+        try:
+            with self.transaction() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO events "
+                    "(occurred_at, kind, decision, request_id, identity, "
+                    "ca_id, serial) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        timestamp,
+                        kind,
+                        decision,
+                        request_id,
+                        identity,
+                        ca_id,
+                        None if serial is None else str(serial),
+                    ),
+                )
+                event_id = cursor.lastrowid
+        except sqlite3.IntegrityError as exc:
+            raise StateError("event could not be recorded") from exc
+        if event_id is None:
+            raise StateError("event record did not return an id")
+        return EventRecord(
+            event_id=int(event_id),
+            occurred_at=timestamp,
+            kind=kind,
+            decision=decision,
+            request_id=request_id,
+            identity=identity,
+            ca_id=ca_id,
+            serial=serial,
+        )
+
+    def list_events(self) -> tuple[EventRecord, ...]:
+        """Return validated append-only events in stable insertion order."""
+        rows = self._connection.execute(
+            "SELECT event_id, occurred_at, kind, decision, request_id, identity, "
+            "ca_id, serial FROM events ORDER BY event_id",
+        ).fetchall()
+        return tuple(self._event_record_from_row(row) for row in rows)
+
+    @staticmethod
+    def _validate_ca_public_key(public_key: bytes, fingerprint: str) -> asyncssh.SSHKey:
+        if not isinstance(public_key, bytes) or not public_key:
+            raise StateError("CA public key is malformed")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise StateError("CA fingerprint is malformed")
+        try:
+            key = asyncssh.import_public_key(public_key)
+        except Exception as exc:
+            raise StateError("CA public key is invalid") from exc
+        if key.get_algorithm() != "ssh-ed25519":
+            raise StateError("CA algorithm is unsupported")
+        if key.get_fingerprint() != fingerprint:
+            raise StateError("CA fingerprint does not match public key")
+        return key
+
+    @staticmethod
+    def _validate_private_key_path(private_key_path: Path) -> Path:
+        if not isinstance(private_key_path, Path):
+            private_key_path = Path(private_key_path)
+        if private_key_path.name in {"", ".", ".."}:
+            raise StateError("CA private-key path is malformed")
+        return private_key_path
+
+    @staticmethod
+    def _ca_record_from_row(row: tuple[object, ...]) -> CAKeyRecord:
+        (
+            ca_id,
+            algorithm,
+            public_key,
+            fingerprint,
+            private_key_path,
+            activated_at,
+            status,
+        ) = row
+        if not isinstance(ca_id, int) or ca_id <= 0:
+            raise StateError("CA record id is malformed")
+        if not isinstance(algorithm, str) or algorithm != "ssh-ed25519":
+            raise StateError("CA record algorithm is unsupported")
+        if not isinstance(public_key, (bytes, bytearray)):
+            raise StateError("CA record public key is malformed")
+        if not isinstance(fingerprint, str) or not isinstance(private_key_path, str):
+            raise StateError("CA record metadata is malformed")
+        if not isinstance(activated_at, int) or activated_at < 0:
+            raise StateError("CA activation time is malformed")
+        if status not in {"active", "retired"}:
+            raise StateError("CA record status is malformed")
+        key = StateDatabase._validate_ca_public_key(bytes(public_key), fingerprint)
+        return CAKeyRecord(
+            ca_id=ca_id,
+            algorithm=algorithm,
+            public_key=key.export_public_key(),
+            fingerprint=fingerprint,
+            private_key_path=StateDatabase._validate_private_key_path(
+                Path(private_key_path),
+            ),
+            activated_at=activated_at,
+            status=cast(str, status),
+        )
+
+    @staticmethod
+    def _certificate_record_from_row(row: tuple[object, ...]) -> CertificateRecord:
+        (
+            certificate_id,
+            ca_id,
+            serial,
+            identity,
+            public_key_fingerprint,
+            principals,
+            valid_after,
+            valid_before,
+            request_id,
+            outcome,
+        ) = row
+        if not isinstance(certificate_id, int) or certificate_id <= 0:
+            raise StateError("certificate id is malformed")
+        _validate_positive_id(ca_id, "ca_id")
+        if not isinstance(serial, str):
+            raise StateError("certificate serial is malformed")
+        try:
+            serial_number = _validate_serial(int(serial))
+        except (TypeError, ValueError) as exc:
+            raise StateError("certificate serial is malformed") from exc
+        identity = _validate_identity(identity)
+        public_key_fingerprint = _validate_text(
+            public_key_fingerprint,
+            "public key fingerprint",
+        )
+        try:
+            principal_values = tuple(json.loads(cast(str, principals)))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise StateError("certificate principals are malformed") from exc
+        principal_values = _validate_principals(principal_values)
+        if not isinstance(valid_after, int) or not isinstance(valid_before, int):
+            raise StateError("certificate validity is malformed")
+        if valid_before - valid_after != ORDINARY_CERTIFICATE_LIFETIME:
+            raise StateError("certificate validity interval is not 25 hours")
+        request_id = _validate_text(request_id, "request id")
+        outcome = _validate_outcome(outcome)
+        return CertificateRecord(
+            certificate_id=certificate_id,
+            ca_id=cast(int, ca_id),
+            serial=serial_number,
+            identity=identity,
+            public_key_fingerprint=public_key_fingerprint,
+            principals=principal_values,
+            valid_after=valid_after,
+            valid_before=valid_before,
+            request_id=request_id,
+            outcome=outcome,
+        )
+
+    @staticmethod
+    def _event_record_from_row(row: tuple[object, ...]) -> EventRecord:
+        event_id, occurred_at, kind, decision, request_id, identity, ca_id, serial = row
+        if not isinstance(event_id, int) or event_id <= 0:
+            raise StateError("event id is malformed")
+        if not isinstance(occurred_at, int) or occurred_at < 0:
+            raise StateError("event time is malformed")
+        kind = _validate_text(kind, "event kind")
+        decision = _validate_text(decision, "event decision")
+        request_id = _validate_text(request_id, "request id")
+        if identity is not None:
+            identity = _validate_identity(identity)
+        if ca_id is not None:
+            _validate_positive_id(ca_id, "ca_id")
+        serial_number = None
+        if serial is not None:
+            if not isinstance(serial, str):
+                raise StateError("event serial is malformed")
+            try:
+                serial_number = _validate_serial(int(serial))
+            except (TypeError, ValueError) as exc:
+                raise StateError("event serial is malformed") from exc
+        return EventRecord(
+            event_id=event_id,
+            occurred_at=occurred_at,
+            kind=kind,
+            decision=decision,
+            request_id=request_id,
+            identity=identity,
+            ca_id=cast(int | None, ca_id),
+            serial=serial_number,
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

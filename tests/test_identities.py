@@ -26,7 +26,7 @@ from ski.identities import (
 from ski.state import StateDatabase
 
 
-def test_identity_store_migrates_host_key_database_without_ca_state(
+def test_identity_store_migrates_host_key_database_with_ca_state(
     tmp_path: Path,
 ) -> None:
     """Identity tables extend the host-key schema without replacing it."""
@@ -49,9 +49,18 @@ def test_identity_store_migrates_host_key_database_without_ca_state(
     try:
         store = SqliteIdentityStore(database)
 
-        assert store.schema_version == 3
+        assert store.schema_version == 4
         assert store.table_names == frozenset(
-            {"ski_schema", "ssh_host_keys", "users", "groups", "user_groups"},
+            {
+                "ski_schema",
+                "ssh_host_keys",
+                "users",
+                "groups",
+                "user_groups",
+                "ca_keys",
+                "certificates",
+                "events",
+            },
         )
         assert database.host_key.fingerprint == original_host_key.fingerprint
     finally:

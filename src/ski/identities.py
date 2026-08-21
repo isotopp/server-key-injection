@@ -168,7 +168,7 @@ class SqliteIdentityStore(IdentityStore):
             PasswordHasher() if password_hasher is None else password_hasher
         )
         self._totp_verifier = totp_verifier
-        if database.schema_version != 3:
+        if database.schema_version != 4:
             raise IdentityUnavailableError("identity schema is unavailable")
 
     @property
