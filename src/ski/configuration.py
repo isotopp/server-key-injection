@@ -12,16 +12,9 @@ from types import MappingProxyType
 from dotenv import dotenv_values
 
 from ski.environment import SYSTEM_ENVIRONMENT_FILE, find_environment_file
-
-CERTIFICATE_LIFETIME = 25 * 60 * 60
-ORDINARY_CERTIFICATE_EXTENSIONS = frozenset(
-    {
-        "pty",
-        "agent-forwarding",
-        "port-forwarding",
-        "x11-forwarding",
-        "user-rc",
-    },
+from ski.policy import (
+    ORDINARY_CERTIFICATE_EXTENSIONS,
+    ORDINARY_CERTIFICATE_LIFETIME,
 )
 
 
@@ -165,7 +158,7 @@ def load_runtime_configuration(
         ca_public_key=ca_public_key,
         ca_krl=ca_krl,
         ordinary_extensions=ordinary_extensions,
-        certificate_lifetime=CERTIFICATE_LIFETIME,
+        certificate_lifetime=ORDINARY_CERTIFICATE_LIFETIME,
         environment_file=environment_file,
         values=MappingProxyType(values),
     )

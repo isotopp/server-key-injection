@@ -7,6 +7,23 @@ from collections.abc import Sequence
 
 USERNAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 GROUP_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
+ORDINARY_CERTIFICATE_LIFETIME = 25 * 60 * 60
+ORDINARY_CERTIFICATE_EXTENSIONS = frozenset(
+    {
+        "pty",
+        "agent-forwarding",
+        "port-forwarding",
+        "x11-forwarding",
+        "user-rc",
+    },
+)
+ORDINARY_EXTENSION_FLAGS = {
+    "pty": "permit_pty",
+    "agent-forwarding": "permit_agent_forwarding",
+    "port-forwarding": "permit_port_forwarding",
+    "x11-forwarding": "permit_x11_forwarding",
+    "user-rc": "permit_user_rc",
+}
 
 
 class PolicyValidationError(ValueError):

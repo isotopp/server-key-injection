@@ -11,22 +11,15 @@ import asyncssh
 
 from ski.ca import ValidatedActiveCA
 from ski.identities import IdentitySnapshot
-from ski.policy import PolicyValidationError, build_principals
-from ski.state import (
+from ski.policy import (
     ORDINARY_CERTIFICATE_LIFETIME,
-    CertificateRecord,
-    StateDatabase,
-    StateError,
+    ORDINARY_EXTENSION_FLAGS,
+    PolicyValidationError,
+    build_principals,
 )
+from ski.state import CertificateRecord, StateDatabase, StateError
 
 TRACER_CERTIFICATE_LIFETIME = 60 * 60
-ORDINARY_EXTENSION_FLAGS = {
-    "pty": "permit_pty",
-    "agent-forwarding": "permit_agent_forwarding",
-    "port-forwarding": "permit_port_forwarding",
-    "x11-forwarding": "permit_x11_forwarding",
-    "user-rc": "permit_user_rc",
-}
 
 
 @dataclass(frozen=True, slots=True)

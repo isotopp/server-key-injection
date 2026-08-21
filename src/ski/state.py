@@ -14,10 +14,14 @@ from typing import TextIO, cast
 
 import asyncssh
 
-from ski.policy import PolicyValidationError, validate_principals, validate_username
+from ski.policy import (
+    ORDINARY_CERTIFICATE_LIFETIME,
+    PolicyValidationError,
+    validate_principals,
+    validate_username,
+)
 
 SUPPORTED_SCHEMA_VERSION = 4
-ORDINARY_CERTIFICATE_LIFETIME = 25 * 60 * 60
 _SERIAL_MAX = 2**64 - 1
 
 
