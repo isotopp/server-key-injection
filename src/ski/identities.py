@@ -81,12 +81,25 @@ class UserSummary:
     enabled: bool
 
 
+@dataclass(frozen=True, slots=True)
+class UserDetail:
+    """Non-secret user data suitable for a detailed administrative view."""
+
+    username: str
+    enabled: bool
+    groups: tuple[str, ...]
+
+
 class IdentityStore(ABC):
     """Backend-neutral identity and group operations used by the issuer."""
 
     @abstractmethod
     def get_user(self, username: str) -> UserRecord:
         """Return one validated user record."""
+
+    @abstractmethod
+    def get_user_detail(self, username: str) -> UserDetail:
+        """Return one validated user detail view without credentials."""
 
     @abstractmethod
     def get_group_snapshot(self, username: str) -> IdentitySnapshot:
@@ -201,6 +214,15 @@ class SqliteIdentityStore(IdentityStore):
             raise
         except Exception as exc:
             raise IdentityUnavailableError("identity data is unavailable") from exc
+
+    def get_user_detail(self, username: str) -> UserDetail:
+        """Return a credential-free view of one validated user."""
+        user = self.get_user(username)
+        return UserDetail(
+            username=user.username,
+            enabled=user.enabled,
+            groups=user.groups,
+        )
 
     def get_group_snapshot(self, username: str) -> IdentitySnapshot:
         user = self.get_user(username)

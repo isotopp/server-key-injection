@@ -421,7 +421,7 @@ def _run_user_show(username: str, *, output: TextIO) -> None:
     """Render one user's non-secret status and group snapshot."""
     database, store = _open_identity_store()
     try:
-        user = store.get_user(username)
+        user = store.get_user_detail(username)
         status = "enabled" if user.enabled else "disabled"
         groups = ", ".join(user.groups) if user.groups else "(none)"
         print(f"User: {user.username}", file=output)

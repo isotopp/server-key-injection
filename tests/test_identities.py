@@ -20,6 +20,7 @@ from ski.identities import (
     IdentityUnavailableError,
     IdentityValidationError,
     SqliteIdentityStore,
+    UserDetail,
     UserRecord,
     UserSummary,
 )
@@ -127,6 +128,27 @@ def test_identity_store_returns_stable_snapshots_and_fails_closed(
         store.get_group_snapshot("alice")
 
 
+def test_identity_store_exposes_secret_free_user_detail(
+    tmp_path: Path,
+) -> None:
+    """Detailed administrative views contain status and groups, never credentials."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        store = SqliteIdentityStore(database)
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        store.create_group("ops")
+        store.add_membership("ops", "alice")
+
+        detail = store.get_user_detail("alice")
+
+        assert isinstance(detail, UserDetail)
+        assert detail == UserDetail("alice", True, ("ops",))
+        assert not hasattr(detail, "password_verifier")
+        assert not hasattr(detail, "totp_secret")
+    finally:
+        database.close()
+
+
 def test_identity_store_contract_accepts_non_sqlite_implementation() -> None:
     """An authentication-facing boundary can use a store with no SQLite calls."""
 
@@ -137,6 +159,9 @@ def test_identity_store_contract_accepts_non_sqlite_implementation() -> None:
         def get_group_snapshot(self, username: str) -> IdentitySnapshot:
             assert username == "alice"
             return IdentitySnapshot(username="alice", groups=("ops",))
+
+        def get_user_detail(self, username: str) -> UserDetail:
+            raise AssertionError("fixture should not use administration methods")
 
         def create_user(
             self, username: str, password: str, totp_secret: str
