@@ -130,6 +130,20 @@ def test_user_show_and_list_are_redacted_read_only_views(
     assert verifier not in list_text
 
 
+def test_user_show_not_found_keeps_safe_exit_and_empty_output(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A missing read-only identity remains a safe CLI failure."""
+    monkeypatch.setenv("SKI_CA_DATABASE", str(tmp_path / "state.sqlite3"))
+    output = io.StringIO()
+
+    with pytest.raises(SystemExit, match="unable to show user"):
+        main(["user", "show", "missing"], output=output)
+
+    assert output.getvalue() == ""
+
+
 def test_user_mutation_requires_optional_administration_capability(
     monkeypatch,
     tmp_path: Path,
