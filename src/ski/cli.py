@@ -11,6 +11,17 @@ from ski.injection import TracerAgentInjector
 from ski.server import TracerIssuer
 
 
+def _port(value: str) -> int:
+    """Parse a public TCP port."""
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return port
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the public command-line parser."""
     parser = argparse.ArgumentParser(
@@ -31,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--port",
         default=22,
-        type=int,
+        type=_port,
         help="TCP port to listen on",
     )
     return parser

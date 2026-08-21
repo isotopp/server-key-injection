@@ -1,0 +1,100 @@
+"""Validated, immutable runtime configuration."""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+
+from dotenv import dotenv_values
+
+from ski.environment import SYSTEM_ENVIRONMENT_FILE, find_environment_file
+
+
+class ConfigurationError(ValueError):
+    """Raised when service configuration cannot be used safely."""
+
+
+@dataclass(frozen=True)
+class RuntimeConfiguration:
+    """The complete configuration snapshot used by a service instance."""
+
+    bind: str
+    port: int
+    database: Path
+    environment_file: Path | None
+    values: Mapping[str, str]
+
+
+def _validate_bind(bind: str) -> str:
+    if bind == "*":
+        return bind
+    try:
+        ipaddress.ip_address(bind)
+    except ValueError as exc:
+        raise ConfigurationError("SKI_BIND must be an IPv4 or IPv6 address") from exc
+    return bind
+
+
+def _validate_port(port: int) -> int:
+    if not 1 <= port <= 65535:
+        raise ConfigurationError("SKI_PORT must be between 1 and 65535")
+    return port
+
+
+def _validate_database(value: str | None) -> Path:
+    if not value:
+        raise ConfigurationError("SKI_CA_DATABASE is required")
+    database = Path(value).expanduser()
+    if database.name in {"", ".", ".."}:
+        raise ConfigurationError("SKI_CA_DATABASE must name a file")
+    parent = database.parent
+    if not parent.is_dir():
+        raise ConfigurationError("SKI_CA_DATABASE parent directory is unavailable")
+    if not os.access(parent, os.W_OK):
+        raise ConfigurationError("SKI_CA_DATABASE parent directory is not writable")
+    return database
+
+
+def load_runtime_configuration(
+    *,
+    bind: str,
+    port: int,
+    exported_environment: Mapping[str, str] | None = None,
+    directory: Path | None = None,
+    home_directory: Path | None = None,
+    system_file: Path = SYSTEM_ENVIRONMENT_FILE,
+) -> RuntimeConfiguration:
+    """Load and validate one service configuration without side effects."""
+    exported = dict(
+        os.environ if exported_environment is None else exported_environment,
+    )
+    selected_home = home_directory
+    if selected_home is None:
+        selected_home = Path(exported.get("HOME", str(Path.home())))
+    environment_file = find_environment_file(
+        directory=directory,
+        home_directory=selected_home,
+        system_file=system_file,
+    )
+
+    values: dict[str, str] = {}
+    if environment_file is not None:
+        for key, value in dotenv_values(environment_file).items():
+            if value is not None:
+                values[key] = value
+    values.update(exported)
+
+    validated_bind = _validate_bind(bind)
+    validated_port = _validate_port(port)
+    database = _validate_database(values.get("SKI_CA_DATABASE"))
+    return RuntimeConfiguration(
+        bind=validated_bind,
+        port=validated_port,
+        database=database,
+        environment_file=environment_file,
+        values=MappingProxyType(values),
+    )
