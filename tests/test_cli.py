@@ -37,8 +37,8 @@ def test_cli_help_lists_the_current_service_and_identity_surface() -> None:
     assert command_line == "  {serve,user,group,ca}"
 
 
-def test_serve_accepts_tracer_listener_options() -> None:
-    """The test issuer exposes the documented listener options."""
+def test_serve_accepts_issuer_listener_options() -> None:
+    """The issuer exposes the documented listener options."""
     args = build_parser().parse_args(["serve", "--bind", "127.0.0.1", "--port", "2222"])
 
     assert args.command == "serve"

@@ -36,6 +36,15 @@ protocol work. Production hosts may continue to use OpenSSH and a small,
 privileged Python authorization executable; the OpenSSH interface is the
 integration point, not the implementation language.
 
+## Current implementation status
+
+The running demo is an authenticated ordinary issuer: `ski serve` performs the
+password-plus-TOTP exchange, signs with the configured persistent CA, and
+injects the resulting ordinary credential into the forwarded agent. The
+anonymous Epic 1 disposable credential path has been removed. The historical
+dummy/tracer terminology retained in the delivery plan below describes prior
+implementation boundaries, not a supported runtime mode.
+
 ## Deployment and Operational Model
 
 `ski` runs as a foreground daemon. Its service command is:
@@ -555,20 +564,21 @@ secrets, time synchronization, rate limiting, and monitoring.
 
 Each section below bounds one future epic and may seed that epic's
 `user-stories.md`. They are intentionally not user stories or implementation
-tickets. The order is deliberate: first prove harmless end-to-end agent
-injection, then add state, authentication, real authorization, and operations.
+tickets. The first sections are retained as historical delivery boundaries;
+the current implementation status above is authoritative for runtime behavior.
 
-### Epic 1 — Dummy issuer and agent-injection tracer
+### Epic 1 — Historical dummy issuer and agent-injection tracer
 
-**Goal.** Run a test-only AsyncSSH issuer which accepts a forwarded agent,
-generates an ephemeral keypair, signs a dummy user certificate, and injects it
-into that agent.
+**Historical goal.** Run a test-only AsyncSSH issuer which accepts a forwarded
+agent, generates an ephemeral keypair, signs a dummy user certificate, and
+injects it into that agent.
 
 **Includes.** The `ski serve` command shape, a non-production test listener,
 agent-forwarding protocol handling, a disposable test CA, short-lived dummy
 certificates, and end-to-end tests with a real local `ssh-agent`.
 
-**Exit boundary.** A test user can see the injected identity with `ssh-add -l`.
+**Historical exit boundary.** A test user can see the injected identity with
+`ssh-add -l`.
 The certificate is deliberately useless: no production host trusts its CA, and
 there is no persistent CA, SQLite state, password/TOTP authentication, group
 claim, KRL, or production-host helper yet.
@@ -583,14 +593,14 @@ IPv6 binding, SQLite opening and short transaction discipline, structured
 journald logging, `SIGTERM`/`SIGINT` shutdown, `SIGHUP` reload, systemd unit
 behaviour, and mutation-command notification of an active service.
 
-**Exit boundary.** The service can be stopped, started, and reloaded without
+**Historical exit boundary.** The service can be stopped, started, and reloaded without
 database corruption or accepting connections against a partially loaded
 configuration. This epic does not add real user authentication or make the
 dummy certificates usable on production hosts.
 
 ### Epic 3 — Demo identities and interactive issuer login
 
-**Goal.** Replace the dummy requester with the demo SQLite-backed password,
+**Historical goal.** Replace the dummy requester with the demo SQLite-backed password,
 TOTP, user, and group model described in
 [Demo identity store](#demo-identity-store).
 
@@ -606,8 +616,8 @@ emergency/temporary access remain out of scope.
 
 ### Epic 4 — Persistent CA and ordinary certificate issuance
 
-**Goal.** Turn the dummy issuer into an ordinary certificate issuer backed by
-the configured CA files and SQLite state.
+**Goal.** The current demo runs an ordinary certificate issuer backed by the
+configured CA files and SQLite state.
 
 **Includes.** Initial CA creation, CA-key loading, certificate serial
 allocation, certificate/CA-log persistence, configured certificate lifetime,

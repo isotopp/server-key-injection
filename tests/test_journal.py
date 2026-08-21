@@ -105,8 +105,8 @@ def test_request_events_are_redacted_across_console_and_journal_sinks() -> None:
         "FULL_ENVIRONMENT_MARKER",
     }
     event = Event(
-        name="tracer_request_completed",
-        message="tracer request completed",
+        name="certificate_request_completed",
+        message="certificate request completed",
         priority=6,
         fields={
             "SKI_REQUEST_ID": "request-1",

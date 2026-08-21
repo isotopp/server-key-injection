@@ -46,11 +46,11 @@ eval "$(ssh-agent -s)"
 ssh-add -l || true
 ```
 
-In Terminal 2, start the local test issuer on the unprivileged tracer port:
+In Terminal 2, start the local issuer on an unprivileged local port:
 
 ```console
 mkdir -p /tmp/ski-smoke
-# Configure a disposable local CA and database. Parent directories must exist.
+# Configure a local persistent CA and database. Parent directories must exist.
 export SKI_CA_DATABASE=/tmp/ski-smoke/state.sqlite3
 export SKI_CA_PRIVATE_KEY=/tmp/ski-smoke/user_ca
 export SKI_CA_PUBLIC_KEY=/tmp/ski-smoke/user_ca.pub
@@ -66,7 +66,7 @@ uv run ski serve --bind 127.0.0.1 --port 2222
 ```
 
 It reports its bound address and remains in the foreground. Back in Terminal 1,
-request a dummy identity with agent forwarding:
+request an ordinary certificate with agent forwarding:
 
 ```console
 ssh -A -tt -p 2222 \

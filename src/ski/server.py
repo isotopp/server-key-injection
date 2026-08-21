@@ -1,4 +1,4 @@
-"""Runtime for the in-memory test issuer."""
+"""AsyncSSH listener for authenticated ordinary certificate issuance."""
 
 from __future__ import annotations
 
@@ -12,23 +12,20 @@ import asyncssh
 from ski.ca import ValidatedActiveCA
 from ski.identities import IdentitySnapshot, IssuerIdentityProvider
 
-TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[str | None]]
-AuthenticatedTracerRequestHandler = Callable[
+AuthenticatedRequestHandler = Callable[
     [asyncssh.SSHServerConnection, IdentitySnapshot], Awaitable[str | None]
 ]
 ListenerFactory = Callable[..., Awaitable[Any]]
 
 
-class _TracerSession(asyncssh.SSHServerSession):
-    """Handle the one interactive session exposed by the tracer."""
+class _IssuerSession(asyncssh.SSHServerSession):
+    """Handle one agent-backed ordinary certificate request."""
 
     def __init__(
         self,
-        request_handler: TracerRequestHandler | None,
-        authenticated_request_handler: AuthenticatedTracerRequestHandler | None,
-        identity: IdentitySnapshot | None,
+        authenticated_request_handler: AuthenticatedRequestHandler | None,
+        identity: IdentitySnapshot,
     ) -> None:
-        self._request_handler = request_handler
         self._authenticated_request_handler = authenticated_request_handler
         self.identity = identity
         self._channel: asyncssh.SSHServerChannel | None = None
@@ -56,10 +53,7 @@ class _TracerSession(asyncssh.SSHServerSession):
             asyncssh.SSHServerConnection,
             self._channel.get_connection(),
         )
-        if (
-            self.identity is not None
-            and self._authenticated_request_handler is not None
-        ):
+        if self._authenticated_request_handler is not None:
             try:
                 result = await self._authenticated_request_handler(
                     connection,
@@ -69,35 +63,25 @@ class _TracerSession(asyncssh.SSHServerSession):
                 self._channel.write_stderr("Certificate request failed.\n")
                 self._channel.exit(1)
                 return
-        elif self._request_handler is not None:
-            try:
-                result = await self._request_handler(connection)
-            except Exception:  # pragma: no cover - exercised by integration
-                self._channel.write_stderr("Tracer request failed.\n")
-                self._channel.exit(1)
-                return
 
         if result is None:
-            self._channel.write("Tracer request accepted.\n")
+            self._channel.write("Certificate request accepted.\n")
         else:
             self._channel.write(f"Key loaded: {result}\n")
-        if self.identity is not None:
-            groups = ", ".join(self.identity.groups) or "(none)"
-            self._channel.write(f"Groups: {groups}\n")
+        groups = ", ".join(self.identity.groups) or "(none)"
+        self._channel.write(f"Groups: {groups}\n")
         self._channel.exit(0)
 
 
-class _TracerSSHServer(asyncssh.SSHServer):
-    """Handle anonymous tracer handshakes or one MFA identity exchange."""
+class _IssuerSSHServer(asyncssh.SSHServer):
+    """Handle one password-plus-TOTP identity exchange."""
 
     def __init__(
         self,
-        request_handler: TracerRequestHandler | None,
-        authenticated_request_handler: AuthenticatedTracerRequestHandler | None,
+        authenticated_request_handler: AuthenticatedRequestHandler | None,
         identity_store: IssuerIdentityProvider | None,
         clock: Callable[[], float],
     ) -> None:
-        self._request_handler = request_handler
         self._authenticated_request_handler = authenticated_request_handler
         self._identity_store = identity_store
         self._clock = clock
@@ -116,7 +100,7 @@ class _TracerSSHServer(asyncssh.SSHServer):
         return self._identity_store is not None
 
     def kbdint_auth_supported(self) -> bool:
-        """Advertise keyboard-interactive auth only for identity-backed tracers."""
+        """Advertise keyboard-interactive auth for configured identities."""
         return self._identity_store is not None
 
     def get_kbdint_challenge(
@@ -177,26 +161,24 @@ class _TracerSSHServer(asyncssh.SSHServer):
                 self._connection.abort()
             return False
 
-    def session_requested(self) -> _TracerSession | bool:
-        if self._identity_store is not None and self._authenticated_identity is None:
+    def session_requested(self) -> _IssuerSession | bool:
+        if self._identity_store is None or self._authenticated_identity is None:
             return False
-        return _TracerSession(
-            self._request_handler,
+        return _IssuerSession(
             self._authenticated_request_handler,
             self._authenticated_identity,
         )
 
 
-class TracerIssuer:
-    """Manage the disposable AsyncSSH listener used by tracer tests."""
+class IssuerServer:
+    """Manage the application-owned AsyncSSH issuer listener."""
 
     def __init__(
         self,
         *,
         bind: str = "*",
         port: int = 22,
-        request_handler: TracerRequestHandler | None = None,
-        authenticated_request_handler: AuthenticatedTracerRequestHandler | None = None,
+        authenticated_request_handler: AuthenticatedRequestHandler | None = None,
         listener_factory: ListenerFactory | None = None,
         server_host_key: asyncssh.SSHKey | None = None,
         identity_store: IssuerIdentityProvider | None = None,
@@ -205,7 +187,6 @@ class TracerIssuer:
     ) -> None:
         self.bind = bind
         self.requested_port = port
-        self.request_handler = request_handler
         self.authenticated_request_handler = authenticated_request_handler
         self.identity_store = identity_store
         self.active_ca = active_ca
@@ -239,13 +220,12 @@ class TracerIssuer:
     async def start(self) -> None:
         """Start the listener with the configured host key."""
         if self._acceptors:
-            raise RuntimeError("test issuer is already running")
+            raise RuntimeError("issuer is already running")
 
         hosts = ("0.0.0.0", "::") if self.bind == "*" else (self.bind,)
 
-        def server_factory() -> _TracerSSHServer:
-            return _TracerSSHServer(
-                self.request_handler,
+        def server_factory() -> _IssuerSSHServer:
+            return _IssuerSSHServer(
                 self.authenticated_request_handler,
                 self.identity_store,
                 self._clock,

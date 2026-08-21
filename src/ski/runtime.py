@@ -25,7 +25,7 @@ from ski.identities import IdentitySnapshot, IssuerIdentityProvider, SqliteIdent
 from ski.injection import OrdinaryAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
 from ski.request_processing import AuthenticatedRequestProcessor
-from ski.server import TracerIssuer
+from ski.server import IssuerServer
 from ski.state import StateDatabase
 
 EventSink = MemoryEventSink | ConsoleEventSink | JournalEventSink
@@ -52,7 +52,7 @@ class IssuerFactory(Protocol):
         server_host_key: asyncssh.SSHKey,
         identity_store: IssuerIdentityProvider,
         active_ca: ValidatedActiveCA,
-    ) -> TracerIssuer:
+    ) -> IssuerServer:
         """Construct one listener for the active runtime resources."""
 
 
@@ -66,7 +66,7 @@ class RuntimeResources:
     configuration: RuntimeConfiguration
     state: StateDatabase
     active_ca: ValidatedActiveCA
-    issuer: TracerIssuer
+    issuer: IssuerServer
     ordinary_injector: OrdinaryAgentInjector
     request_processor: AuthenticatedRequestProcessor
 
@@ -89,7 +89,7 @@ class ServiceRuntime:
         exported_environment: Mapping[str, str] | None = None,
         event_sink: EventSink | None = None,
         state_opener: StateOpener = StateDatabase.open,
-        issuer_factory: IssuerFactory = TracerIssuer,
+        issuer_factory: IssuerFactory = IssuerServer,
     ) -> None:
         self.bind = bind
         self.port = port
@@ -117,8 +117,8 @@ class ServiceRuntime:
         return resources.configuration
 
     @property
-    def issuer(self) -> TracerIssuer:
-        """Return the active tracer issuer."""
+    def issuer(self) -> IssuerServer:
+        """Return the active issuer listener."""
         resources = self._resources
         if resources is None:
             raise RuntimeError("service runtime is not started")
@@ -136,7 +136,7 @@ class ServiceRuntime:
 
         self._emit("service_starting", "ski startup requested")
         state: StateDatabase | None = None
-        issuer: TracerIssuer | None = None
+        issuer: IssuerServer | None = None
         try:
             configuration = load_runtime_configuration(
                 bind=self.bind,
@@ -172,7 +172,7 @@ class ServiceRuntime:
             issuer = self._issuer_factory(
                 bind=configuration.bind,
                 port=configuration.port,
-                authenticated_request_handler=self._handle_authenticated_tracer_request,
+                authenticated_request_handler=self._handle_authenticated_request,
                 server_host_key=host_key,
                 identity_store=identity_store,
                 active_ca=active_ca,
@@ -330,7 +330,7 @@ class ServiceRuntime:
         """Wait for either a reload or terminal shutdown request."""
         return await self._control.wait_for_control_event()
 
-    async def _handle_authenticated_tracer_request(
+    async def _handle_authenticated_request(
         self,
         connection: Any,
         identity: IdentitySnapshot,
@@ -354,7 +354,7 @@ class ServiceRuntime:
 
     async def _close_partial_resources(
         self,
-        issuer: TracerIssuer | None,
+        issuer: IssuerServer | None,
         state: StateDatabase | None,
     ) -> None:
         """Close resources acquired before the immutable bundle became visible."""

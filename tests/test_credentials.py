@@ -1,4 +1,4 @@
-"""Behavioural tests for disposable tracer credentials."""
+"""Behavioural tests for ordinary certificate credentials."""
 
 from __future__ import annotations
 

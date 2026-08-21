@@ -18,7 +18,7 @@ from ski.identities import (
 )
 from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
-from ski.server import TracerIssuer
+from ski.server import IssuerServer
 from ski.state import StateDatabase
 from support import MfaClient as _MfaClient
 from support import runtime_environment
@@ -29,7 +29,7 @@ def test_enabled_user_is_admitted_by_password_and_totp_challenge(
 ) -> None:
     """A real client receives distinct factors and completes authentication."""
     database = StateDatabase.open(tmp_path / "state.sqlite3")
-    issuer: TracerIssuer | None = None
+    issuer: IssuerServer | None = None
     try:
         store = SqliteIdentityStore(database)
         user = store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
@@ -37,7 +37,7 @@ def test_enabled_user_is_admitted_by_password_and_totp_challenge(
 
         async def exercise() -> None:
             nonlocal issuer
-            issuer = TracerIssuer(
+            issuer = IssuerServer(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=store,
@@ -88,7 +88,7 @@ def test_authenticated_exchange_uses_only_read_identity_capabilities() -> None:
             return IdentitySnapshot(username="alice", groups=("ops",))
 
     async def exercise() -> None:
-        issuer = TracerIssuer(
+        issuer = IssuerServer(
             bind="127.0.0.1",
             port=0,
             identity_store=cast(IssuerIdentityProvider, ReadOnlyIdentityBackend()),
@@ -135,7 +135,7 @@ def test_read_only_identity_backend_failure_is_a_uniform_denial() -> None:
             return IdentitySnapshot(username=username, groups=())
 
     async def exercise() -> None:
-        issuer = TracerIssuer(
+        issuer = IssuerServer(
             bind="127.0.0.1",
             port=0,
             identity_store=cast(
@@ -212,7 +212,6 @@ def test_invalid_mfa_inputs_are_uniform_denials_before_session(
 ) -> None:
     """Every failed factor path denies authentication without opening a session."""
     database = StateDatabase.open(tmp_path / f"{failure}.sqlite3")
-    requests = 0
     try:
         store = SqliteIdentityStore(database)
         if failure != "unknown":
@@ -246,19 +245,10 @@ def test_invalid_mfa_inputs_are_uniform_denials_before_session(
         )
 
         async def exercise() -> None:
-            nonlocal requests
-
-            async def request_handler(
-                _connection: asyncssh.SSHServerConnection,
-            ) -> None:
-                nonlocal requests
-                requests += 1
-
-            issuer = TracerIssuer(
+            issuer = IssuerServer(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=identity_store,
-                request_handler=request_handler,
             )
             await issuer.start()
             try:
@@ -278,7 +268,6 @@ def test_invalid_mfa_inputs_are_uniform_denials_before_session(
                 await issuer.close()
 
         asyncio.run(exercise())
-        assert requests == 0
     finally:
         database.close()
 
@@ -291,7 +280,7 @@ def test_failed_exchange_requires_a_new_connection_for_retry(tmp_path: Path) -> 
         store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
 
         async def exercise() -> None:
-            issuer = TracerIssuer(
+            issuer = IssuerServer(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=store,
@@ -349,7 +338,7 @@ def test_authentication_denial_does_not_echo_factor_or_store_details(
         code = "DENIAL_TOTP_MARKER"
 
         async def exercise() -> None:
-            issuer = TracerIssuer(
+            issuer = IssuerServer(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=store,
@@ -393,7 +382,7 @@ def test_totp_window_is_enforced_through_real_ssh(
         store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
 
         async def exercise() -> None:
-            issuer = TracerIssuer(
+            issuer = IssuerServer(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=store,

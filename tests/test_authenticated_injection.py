@@ -1,4 +1,4 @@
-"""Behavioural tests for authenticated disposable credential injection."""
+"""Behavioural tests for authenticated ordinary credential injection."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from ski.identities import IdentitySnapshot, SqliteIdentityStore
 from ski.injection import OrdinaryAgentInjector
 from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
-from ski.server import TracerIssuer
+from ski.server import IssuerServer
 from ski.state import StateDatabase, StateError
 from support import MfaClient as _MfaClient
 from support import mfa_client_factory, runtime_environment, ssh_agent
@@ -251,7 +251,7 @@ def test_persistence_failure_compensates_only_the_new_issuer_credential(
                     )
                     return "unreachable"
 
-                issuer = TracerIssuer(
+                issuer = IssuerServer(
                     bind="127.0.0.1",
                     port=0,
                     identity_store=store,
@@ -347,7 +347,7 @@ def test_agent_workflow_retries_a_typed_serial_collision(
                     )
                     return "ordinary"
 
-                issuer = TracerIssuer(
+                issuer = IssuerServer(
                     bind="127.0.0.1",
                     port=0,
                     identity_store=store,
@@ -408,7 +408,7 @@ def test_authenticated_request_without_forwarding_does_not_inject(
         try:
             store = SqliteIdentityStore(database)
             user = store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
-            issuer = TracerIssuer(
+            issuer = IssuerServer(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=store,
@@ -471,7 +471,7 @@ def test_group_snapshot_failure_denies_before_agent_injection(tmp_path: Path) ->
                 def get_group_snapshot(self, username: str):
                     raise RuntimeError("group backend unavailable")
 
-            issuer = TracerIssuer(
+            issuer = IssuerServer(
                 bind="127.0.0.1",
                 port=0,
                 identity_store=BrokenGroupStore(database),
