@@ -11,6 +11,7 @@ from pathlib import Path
 
 import asyncssh
 
+from ski.secure_files import SecureFileError, validate_secure_file
 from ski.state import CAKeyRecord, StateDatabase, StateError
 
 
@@ -50,8 +51,20 @@ def load_validated_active_ca(
 ) -> ValidatedActiveCA:
     """Load and cross-check the configured private/public CA and state record."""
     try:
+        validate_secure_file(
+            private_path,
+            owner_uid=os.geteuid(),
+            group_gid=os.getegid(),
+        )
+        validate_secure_file(
+            public_path,
+            owner_uid=os.geteuid(),
+            group_gid=os.getegid(),
+        )
         private_key = asyncssh.import_private_key(private_path.read_bytes())
         public_key = asyncssh.import_public_key(public_path.read_bytes())
+    except SecureFileError as exc:
+        raise StateError("active CA material is unsafe") from exc
     except (OSError, asyncssh.KeyImportError) as exc:
         raise StateError("active CA material is unavailable") from exc
     except Exception as exc:
@@ -149,6 +162,7 @@ class CAFileWriter:
                 self._rename(temporary_path, target)
                 installed.append(target)
                 temporary.remove(temporary_path)
+                self._validate_installed(target)
         except Exception as exc:
             for path in temporary:
                 path.unlink(missing_ok=True)
@@ -158,6 +172,18 @@ class CAFileWriter:
                 raise
             raise CAFileError("CA material could not be installed") from exc
         return material
+
+    @staticmethod
+    def _validate_installed(path: Path) -> None:
+        """Validate one atomically installed CA file before success."""
+        try:
+            validate_secure_file(
+                path,
+                owner_uid=os.geteuid(),
+                group_gid=os.getegid(),
+            )
+        except SecureFileError as exc:
+            raise CAFileError("installed CA material is unsafe") from exc
 
     @staticmethod
     def _validate_targets(paths: Sequence[Path]) -> None:
@@ -175,7 +201,7 @@ class CAFileWriter:
             if resolved_path in resolved:
                 raise CAFileError("CA output paths must be distinct")
             resolved.add(resolved_path)
-            if path.exists():
+            if path.is_symlink() or path.exists():
                 raise CAFileError("CA output already exists")
 
     def _generate(self) -> GeneratedCAMaterial:

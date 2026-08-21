@@ -12,10 +12,10 @@ from pathlib import Path
 import asyncssh
 import pytest
 
-from ski.ca import CAFileError, CAFileWriter
+from ski.ca import CAFileError, CAFileWriter, load_validated_active_ca
 from ski.cli import main
 from ski.notify import ServiceManagerError, ServiceReloadNotifier
-from ski.state import StateDatabase
+from ski.state import StateDatabase, StateError
 
 
 class _StoppedServiceManager:
@@ -92,6 +92,97 @@ def test_ca_init_creates_protected_ed25519_material_and_public_status(
     assert private_path.read_text(errors="ignore") not in rendered
     assert "BEGIN OPENSSH PRIVATE KEY" not in rendered
     assert "ssh-ed25519" in rendered
+
+
+def test_active_ca_loader_rejects_symlinked_private_key(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Loading an active CA never follows a symlinked private key path."""
+    for key, value in _ca_environment(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    main(
+        ["ca", "init"],
+        notifier=ServiceReloadNotifier(_StoppedServiceManager()),
+        output=io.StringIO(),
+    )
+    private_path = tmp_path / "user_ca"
+    real_private_path = tmp_path / "real-user-ca"
+    private_path.rename(real_private_path)
+    private_path.symlink_to(real_private_path)
+
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        with pytest.raises(StateError, match="CA material"):
+            load_validated_active_ca(
+                database,
+                private_path=private_path,
+                public_path=tmp_path / "user_ca.pub",
+            )
+    finally:
+        database.close()
+
+
+def test_active_ca_loader_rejects_group_writable_public_key(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Loading an active CA rejects group-writable public material."""
+    for key, value in _ca_environment(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    main(
+        ["ca", "init"],
+        notifier=ServiceReloadNotifier(_StoppedServiceManager()),
+        output=io.StringIO(),
+    )
+    (tmp_path / "user_ca.pub").chmod(0o664)
+
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        with pytest.raises(StateError, match="CA material"):
+            load_validated_active_ca(
+                database,
+                private_path=tmp_path / "user_ca",
+                public_path=tmp_path / "user_ca.pub",
+            )
+    finally:
+        database.close()
+
+
+def test_ca_file_writer_rejects_preexisting_symlink_target(tmp_path: Path) -> None:
+    """CA initialization refuses a dangling symlink target."""
+    private_path = tmp_path / "user_ca"
+    private_path.symlink_to(tmp_path / "not-created")
+
+    with pytest.raises(CAFileError, match="already exists"):
+        CAFileWriter().install(
+            private_path=private_path,
+            public_path=tmp_path / "user_ca.pub",
+            krl_path=tmp_path / "revoked.krl",
+        )
+
+
+def test_ca_file_writer_cleans_unsafe_installed_target(tmp_path: Path) -> None:
+    """CA initialization compensates when an installed file is unsafe."""
+
+    def unsafe_rename(
+        source: str | os.PathLike[str],
+        target: str | os.PathLike[str],
+    ) -> None:
+        os.replace(source, target)
+        if Path(target).name == "user_ca":
+            Path(target).chmod(0o620)
+
+    with pytest.raises(CAFileError, match="unsafe"):
+        CAFileWriter(rename=unsafe_rename).install(
+            private_path=tmp_path / "user_ca",
+            public_path=tmp_path / "user_ca.pub",
+            krl_path=tmp_path / "revoked.krl",
+        )
+
+    assert not (tmp_path / "user_ca").exists()
+    assert not (tmp_path / "user_ca.pub").exists()
+    assert not (tmp_path / "revoked.krl").exists()
 
 
 def test_ca_init_refuses_existing_material_without_mutation(
