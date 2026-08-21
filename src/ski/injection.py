@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import asyncssh
 
+from ski.ca import ValidatedActiveCA
 from ski.credentials import (
     TRACER_CERTIFICATE_LIFETIME,
     DisposableCertificateFactory,
@@ -52,88 +55,57 @@ class OrdinaryInjectionResult:
     groups: tuple[str, ...]
 
 
-class OrdinaryAgentInjector:
-    """Issue one ordinary credential and replace only its owned agent entry."""
+class AsyncSSHAgentAdapter:
+    """Own AsyncSSH agent mechanics and issuer-credential ownership checks."""
 
     def __init__(
         self,
-        issuance: OrdinaryIssuanceService,
-        *,
-        clock: Callable[[], float] = time.time,
+        client: asyncssh.SSHAgentClient,
+        active_ca: ValidatedActiveCA,
     ) -> None:
-        self._issuance = issuance
-        self._active_ca = issuance.active_ca
-        self._clock = clock
+        self._client = client
+        self._active_ca = active_ca
 
-    async def handle(
+    async def owned_keys(self, identity: IdentitySnapshot) -> list[asyncssh.SSHKeyPair]:
+        """Return only existing agent entries proven to belong to this issuer."""
+        keys = await self._client.get_keys()
+        return [pair for pair in keys if self._is_owned(pair, identity)]
+
+    async def remove_keys(self, keys: list[asyncssh.SSHKeyPair]) -> None:
+        """Remove exactly the supplied, already-owned agent entries."""
+        if keys:
+            await self._client.remove_keys(keys)
+
+    async def add_credential(
         self,
-        connection: asyncssh.SSHServerConnection,
-        identity: IdentitySnapshot,
-        *,
-        request_id: str,
-    ) -> OrdinaryInjectionResult:
-        """Replace one provably owned credential after durable issuance."""
-        try:
-            async with asyncssh.connect_agent(connection) as agent:
-                keys = await agent.get_keys()
-                owned = [pair for pair in keys if self._is_owned(pair, identity)]
-                removed_owned = False
-                credential: OrdinaryIdentity | None = None
-                try:
-                    for _ in range(5):
-                        credential = self._issuance.prepare(identity)
-                        lifetime = max(
-                            1,
-                            credential.valid_before - int(self._clock()),
-                        )
-                        if owned and not removed_owned:
-                            await agent.remove_keys(owned)
-                            removed_owned = True
-                        await agent.add_keys(
-                            [credential.agent_keypair],
-                            lifetime=lifetime,
-                        )
-                        try:
-                            record = self._issuance.commit(
-                                credential,
-                                request_id=request_id,
-                            )
-                        except DuplicateCertificateSerialError:
-                            await self._remove_prepared(agent, credential)
-                            continue
-                        return OrdinaryInjectionResult(
-                            credential=credential,
-                            record=record,
-                            groups=identity.groups,
-                        )
-                except Exception:
-                    if credential is not None:
-                        await self._remove_prepared(agent, credential)
-                    raise
-        except Exception:
-            self._issuance.record_failure(identity, request_id)
-            raise
-        self._issuance.record_failure(identity, request_id)
-        raise StateError("certificate serial allocation failed")
-
-    @staticmethod
-    async def _remove_prepared(
-        agent: asyncssh.SSHAgentClient,
         credential: OrdinaryIdentity,
+        *,
+        lifetime: int,
     ) -> None:
-        """Remove a newly added pair without touching unrelated identities."""
+        """Add one generated credential to the forwarded agent."""
+        await self._client.add_keys(
+            [credential.agent_keypair],
+            lifetime=lifetime,
+        )
+
+    async def remove_credential(self, credential: OrdinaryIdentity) -> None:
+        """Remove both agent entries associated with one generated credential."""
         try:
             for public_data in (
                 credential.public_key.public_data,
                 credential.certificate.public_data,
             ):
-                added = await agent.get_keys([public_data])
+                added = await self._client.get_keys([public_data])
                 if added:
-                    await agent.remove_keys(added)
+                    await self._client.remove_keys(list(added))
         except Exception:
             pass
 
-    def _is_owned(self, pair: asyncssh.SSHKeyPair, identity: IdentitySnapshot) -> bool:
+    def _is_owned(
+        self,
+        pair: asyncssh.SSHKeyPair,
+        identity: IdentitySnapshot,
+    ) -> bool:
         """Require marker, certificate identity, CA, serial, and principals."""
         username = identity.username
         try:
@@ -163,3 +135,76 @@ class OrdinaryAgentInjector:
             return False
         marker = f"ski:{username}:{self._active_ca.record.fingerprint}:{serial}"
         return comment == marker
+
+
+@asynccontextmanager
+async def connected_agent(
+    connection: asyncssh.SSHServerConnection,
+    active_ca: ValidatedActiveCA,
+) -> AsyncIterator[AsyncSSHAgentAdapter]:
+    """Connect one adapter to the forwarded agent for a single request."""
+    async with asyncssh.connect_agent(connection) as client:
+        yield AsyncSSHAgentAdapter(client, active_ca)
+
+
+class OrdinaryAgentInjector:
+    """Issue one ordinary credential and replace only its owned agent entry."""
+
+    def __init__(
+        self,
+        issuance: OrdinaryIssuanceService,
+        *,
+        clock: Callable[[], float] = time.time,
+        agent_factory: Callable[..., Any] = connected_agent,
+    ) -> None:
+        self._issuance = issuance
+        self._active_ca = issuance.active_ca
+        self._clock = clock
+        self._agent_factory = agent_factory
+
+    async def handle(
+        self,
+        connection: asyncssh.SSHServerConnection,
+        identity: IdentitySnapshot,
+        *,
+        request_id: str,
+    ) -> OrdinaryInjectionResult:
+        """Replace one provably owned credential after durable issuance."""
+        try:
+            async with self._agent_factory(connection, self._active_ca) as agent:
+                owned = await agent.owned_keys(identity)
+                removed_owned = False
+                credential: OrdinaryIdentity | None = None
+                try:
+                    for _ in range(5):
+                        credential = self._issuance.prepare(identity)
+                        lifetime = max(
+                            1,
+                            credential.valid_before - int(self._clock()),
+                        )
+                        if owned and not removed_owned:
+                            await agent.remove_keys(owned)
+                            removed_owned = True
+                        await agent.add_credential(credential, lifetime=lifetime)
+                        try:
+                            record = self._issuance.commit(
+                                credential,
+                                request_id=request_id,
+                            )
+                        except DuplicateCertificateSerialError:
+                            await agent.remove_credential(credential)
+                            continue
+                        return OrdinaryInjectionResult(
+                            credential=credential,
+                            record=record,
+                            groups=identity.groups,
+                        )
+                except Exception:
+                    if credential is not None:
+                        await agent.remove_credential(credential)
+                    raise
+        except Exception:
+            self._issuance.record_failure(identity, request_id)
+            raise
+        self._issuance.record_failure(identity, request_id)
+        raise StateError("certificate serial allocation failed")
