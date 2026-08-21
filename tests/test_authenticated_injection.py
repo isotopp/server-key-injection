@@ -180,6 +180,7 @@ def test_ordinary_renewal_preserves_an_unrelated_agent_identity(
                         )
                         stdout, stderr = await process.communicate()
                         assert process.exit_status == 0, stderr
+                        assert stdout.startswith("Key loaded: alice serial=")
                 listed = await asyncio.create_subprocess_exec(
                     "ssh-add",
                     "-L",
@@ -198,6 +199,53 @@ def test_ordinary_renewal_preserves_an_unrelated_agent_identity(
     listing = asyncio.run(exercise())
     assert b"unrelated" in listing
     assert b"ski:alice:" in listing
+
+
+def test_runtime_rejects_anonymous_issuance_before_agent_access(
+    tmp_path: Path,
+) -> None:
+    """The public issuer requires identity authentication before issuance."""
+    database_path = tmp_path / "state.sqlite3"
+
+    async def exercise() -> None:
+        async with ssh_agent() as agent_environment:
+            runtime = ServiceRuntime(
+                bind="127.0.0.1",
+                port=0,
+                exported_environment=runtime_environment(tmp_path, database_path),
+                event_sink=MemoryEventSink(),
+            )
+            await runtime.start()
+            try:
+                with pytest.raises(
+                    (asyncssh.PermissionDenied, asyncssh.ConnectionLost)
+                ):
+                    async with asyncssh.connect(
+                        "127.0.0.1",
+                        port=runtime.issuer.port,
+                        username="unknown",
+                        known_hosts=None,
+                        agent_path=agent_environment["SSH_AUTH_SOCK"],
+                        agent_forwarding=True,
+                        client_factory=lambda: _MfaClient("password", "000000"),
+                        kbdint_auth=True,
+                    ):
+                        pass
+
+                listed = await asyncio.create_subprocess_exec(
+                    "ssh-add",
+                    "-l",
+                    env={**os.environ, **agent_environment},
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                listing, _ = await listed.communicate()
+                assert listed.returncode == 1
+                assert b"The agent has no identities" in listing
+            finally:
+                await runtime.close()
+
+    asyncio.run(exercise())
 
 
 def test_persistence_failure_compensates_only_the_new_issuer_credential(
