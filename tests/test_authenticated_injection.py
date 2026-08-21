@@ -6,19 +6,22 @@ import asyncio
 import os
 import re
 from pathlib import Path
+from typing import cast
 
 import asyncssh
 import pyotp
 import pytest
 
-from ski.identities import SqliteIdentityStore
-from ski.injection import TracerAgentInjector
+from ski.ca import load_validated_active_ca
+from ski.credentials import OrdinaryIssuanceService
+from ski.identities import IdentitySnapshot, SqliteIdentityStore
+from ski.injection import OrdinaryAgentInjector, TracerAgentInjector
 from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
-from ski.state import StateDatabase
+from ski.state import StateDatabase, StateError
 from support import MfaClient as _MfaClient
-from support import mfa_client_factory, runtime_environment
+from support import mfa_client_factory, runtime_environment, ssh_agent
 
 
 async def _start_test_agent() -> dict[str, str]:
@@ -195,6 +198,114 @@ def test_ordinary_renewal_preserves_an_unrelated_agent_identity(
     listing = asyncio.run(exercise())
     assert b"unrelated" in listing
     assert b"ski:alice:" in listing
+
+
+def test_persistence_failure_compensates_only_the_new_issuer_credential(
+    tmp_path: Path,
+) -> None:
+    """A failed commit removes its new key while retaining unrelated agent keys."""
+    database_path = tmp_path / "state.sqlite3"
+    environment = runtime_environment(tmp_path, database_path)
+    database = StateDatabase.open(database_path)
+    try:
+        active_ca = load_validated_active_ca(
+            database,
+            private_path=Path(environment["SKI_CA_PRIVATE_KEY"]),
+            public_path=Path(environment["SKI_CA_PUBLIC_KEY"]),
+        )
+        issuance = OrdinaryIssuanceService(
+            database,
+            active_ca,
+            extensions=("pty",),
+            serial_allocator=lambda: 123,
+        )
+
+        class FailingCommitIssuance:
+            active_ca = issuance.active_ca
+
+            def prepare(self, identity: IdentitySnapshot):
+                return issuance.prepare(identity)
+
+            def commit(self, credential, *, request_id: str):
+                del credential, request_id
+                raise StateError("persistence unavailable")
+
+            def record_failure(self, identity: IdentitySnapshot, request_id: str):
+                issuance.record_failure(identity, request_id)
+
+        async def exercise() -> bytes:
+            async with ssh_agent() as agent_environment:
+                unrelated_path = tmp_path / "unrelated"
+                unrelated = asyncssh.generate_private_key(
+                    "ssh-ed25519",
+                    comment="unrelated",
+                )
+                unrelated_path.write_bytes(unrelated.export_private_key())
+                unrelated_path.chmod(0o600)
+                add_process = await asyncio.create_subprocess_exec(
+                    "ssh-add",
+                    str(unrelated_path),
+                    env={**os.environ, **agent_environment},
+                )
+                await add_process.wait()
+                assert add_process.returncode == 0
+
+                injector = OrdinaryAgentInjector(
+                    cast(OrdinaryIssuanceService, FailingCommitIssuance()),
+                )
+
+                async def request_handler(
+                    connection: asyncssh.SSHServerConnection,
+                ) -> str:
+                    await injector.handle(
+                        connection,
+                        IdentitySnapshot("alice", ()),
+                        request_id="request-failure",
+                    )
+                    return "unreachable"
+
+                issuer = TracerIssuer(
+                    bind="127.0.0.1",
+                    port=0,
+                    request_handler=request_handler,
+                )
+                await issuer.start()
+                try:
+                    async with asyncssh.connect(
+                        "127.0.0.1",
+                        port=issuer.port,
+                        username="test-user",
+                        known_hosts=None,
+                        agent_path=agent_environment["SSH_AUTH_SOCK"],
+                        agent_forwarding=True,
+                    ) as connection:
+                        process = await connection.create_process(
+                            command=None,
+                            request_pty=False,
+                        )
+                        stdout, stderr = await process.communicate()
+                        assert process.exit_status == 1
+                        assert stdout == ""
+                        assert stderr == "Tracer request failed.\n"
+                finally:
+                    await issuer.close()
+
+                listing_process = await asyncio.create_subprocess_exec(
+                    "ssh-add",
+                    "-L",
+                    env={**os.environ, **agent_environment},
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                listing, errors = await listing_process.communicate()
+                assert listing_process.returncode == 0, errors.decode()
+                return listing
+
+        listing = asyncio.run(exercise())
+        assert b"unrelated" in listing
+        assert b"ski:alice:" not in listing
+    finally:
+        database.close()
 
 
 def test_authenticated_request_without_forwarding_does_not_inject(

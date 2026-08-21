@@ -78,26 +78,38 @@ class OrdinaryAgentInjector:
                 keys = await agent.get_keys()
                 owned = [pair for pair in keys if self._is_owned(pair, identity)]
                 removed_owned = False
-                for _ in range(5):
-                    credential = self._issuance.prepare(identity)
-                    lifetime = max(1, credential.valid_before - int(self._clock()))
-                    if owned and not removed_owned:
-                        await agent.remove_keys(owned)
-                        removed_owned = True
-                    await agent.add_keys([credential.agent_keypair], lifetime=lifetime)
-                    try:
-                        record = self._issuance.commit(
-                            credential,
-                            request_id=request_id,
+                credential: OrdinaryIdentity | None = None
+                try:
+                    for _ in range(5):
+                        credential = self._issuance.prepare(identity)
+                        lifetime = max(
+                            1,
+                            credential.valid_before - int(self._clock()),
                         )
-                    except DuplicateCertificateSerialError:
+                        if owned and not removed_owned:
+                            await agent.remove_keys(owned)
+                            removed_owned = True
+                        await agent.add_keys(
+                            [credential.agent_keypair],
+                            lifetime=lifetime,
+                        )
+                        try:
+                            record = self._issuance.commit(
+                                credential,
+                                request_id=request_id,
+                            )
+                        except DuplicateCertificateSerialError:
+                            await self._remove_prepared(agent, credential)
+                            continue
+                        return OrdinaryInjectionResult(
+                            credential=credential,
+                            record=record,
+                            groups=identity.groups,
+                        )
+                except Exception:
+                    if credential is not None:
                         await self._remove_prepared(agent, credential)
-                        continue
-                    return OrdinaryInjectionResult(
-                        credential=credential,
-                        record=record,
-                        groups=identity.groups,
-                    )
+                    raise
         except Exception:
             self._issuance.record_failure(identity, request_id)
             raise
@@ -111,9 +123,13 @@ class OrdinaryAgentInjector:
     ) -> None:
         """Remove a newly added pair without touching unrelated identities."""
         try:
-            added = await agent.get_keys([credential.public_key.public_data])
-            if added:
-                await agent.remove_keys(added)
+            for public_data in (
+                credential.public_key.public_data,
+                credential.certificate.public_data,
+            ):
+                added = await agent.get_keys([public_data])
+                if added:
+                    await agent.remove_keys(added)
         except Exception:
             pass
 
