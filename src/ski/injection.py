@@ -16,7 +16,11 @@ from ski.credentials import (
 )
 from ski.identities import IdentitySnapshot
 from ski.policy import PolicyValidationError, validate_principals
-from ski.state import CertificateRecord, StateError
+from ski.state import (
+    CertificateRecord,
+    DuplicateCertificateSerialError,
+    StateError,
+)
 
 
 class TracerAgentInjector:
@@ -86,15 +90,9 @@ class OrdinaryAgentInjector:
                             credential,
                             request_id=request_id,
                         )
-                    except Exception as exc:
+                    except DuplicateCertificateSerialError:
                         await self._remove_prepared(agent, credential)
-                        if isinstance(
-                            exc, StateError
-                        ) and "serial is already recorded" in str(
-                            exc,
-                        ):
-                            continue
-                        raise
+                        continue
                     return OrdinaryInjectionResult(
                         credential=credential,
                         record=record,

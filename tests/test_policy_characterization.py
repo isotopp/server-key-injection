@@ -16,7 +16,7 @@ from ski.identities import (
     SqliteIdentityStore,
 )
 from ski.policy import PolicyValidationError, build_principals, validate_principals
-from ski.state import StateDatabase, StateError
+from ski.state import DuplicateCertificateSerialError, StateDatabase, StateError
 from support import runtime_environment
 
 
@@ -93,7 +93,7 @@ def test_persistence_rejects_duplicate_serials_and_wrong_lifetimes(
             request_id="request-1",
             outcome="success",
         )
-        with pytest.raises(StateError, match="serial"):
+        with pytest.raises(DuplicateCertificateSerialError):
             database.record_certificate(
                 ca_id=ca.ca_id,
                 serial=7,

@@ -17,7 +17,12 @@ from ski.policy import (
     PolicyValidationError,
     build_principals,
 )
-from ski.state import CertificateRecord, StateDatabase, StateError
+from ski.state import (
+    CertificateRecord,
+    DuplicateCertificateSerialError,
+    StateDatabase,
+    StateError,
+)
 
 TRACER_CERTIFICATE_LIFETIME = 60 * 60
 
@@ -177,9 +182,9 @@ class OrdinaryIssuanceService:
             credential = self.prepare(identity)
             try:
                 record = self.commit(credential, request_id=request_id)
-            except StateError as exc:
-                if "serial is already recorded" in str(exc):
-                    continue
+            except DuplicateCertificateSerialError:
+                continue
+            except StateError:
                 self.record_failure(identity, request_id)
                 raise
             return credential, record

@@ -82,6 +82,10 @@ class StateError(RuntimeError):
     """Base error for local service state failures."""
 
 
+class DuplicateCertificateSerialError(StateError):
+    """Raised when an issuance serial is already recorded for a CA."""
+
+
 class StateOwnershipError(StateError):
     """Raised when another daemon owns the configured state database."""
 
@@ -671,7 +675,9 @@ class StateDatabase:
                 )
                 certificate_id = cursor.lastrowid
         except sqlite3.IntegrityError as exc:
-            raise StateError("certificate serial is already recorded") from exc
+            raise DuplicateCertificateSerialError(
+                "certificate serial is already recorded",
+            ) from exc
         if certificate_id is None:
             raise StateError("certificate record did not return an id")
         return CertificateRecord(
@@ -767,7 +773,9 @@ class StateDatabase:
                     ),
                 )
         except sqlite3.IntegrityError as exc:
-            raise StateError("certificate serial is already recorded") from exc
+            raise DuplicateCertificateSerialError(
+                "certificate serial is already recorded",
+            ) from exc
         return CertificateRecord(
             certificate_id=int(certificate_id),
             ca_id=ca_id,
