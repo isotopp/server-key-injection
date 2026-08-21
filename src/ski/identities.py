@@ -117,6 +117,7 @@ class GroupSnapshotProvider(Protocol):
         """Return the canonical identity and current group snapshot."""
 
 
+@runtime_checkable
 class IssuerIdentityProvider(
     IdentityAuthenticator,
     CanonicalIdentityLookup,

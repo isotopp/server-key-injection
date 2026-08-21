@@ -19,6 +19,7 @@ from ski.identities import (
     IdentityStore,
     IdentityUnavailableError,
     IdentityValidationError,
+    IssuerIdentityProvider,
     SqliteIdentityStore,
     UserDetail,
     UserRecord,
@@ -186,6 +187,33 @@ def test_identity_store_uses_only_the_public_state_unit_of_work(
         assert store.get_group_snapshot("alice").groups == ("ops",)
     finally:
         database.close()
+
+
+def test_issuer_identity_contract_is_structural_and_read_only() -> None:
+    """A minimal adapter satisfies the issuer capability without admin APIs."""
+
+    class MinimalAdapter:
+        def lookup_identity(self, username: str) -> str:
+            return username
+
+        def verify_password(self, username: str, password: str) -> bool:
+            return username == "alice" and password == "password"
+
+        def verify_totp(
+            self,
+            username: str,
+            code: str,
+            *,
+            now: int | None = None,
+        ) -> bool:
+            del now
+            return username == "alice" and code == "123456"
+
+        def get_group_snapshot(self, username: str) -> IdentitySnapshot:
+            return IdentitySnapshot(username=username, groups=("ops",))
+
+    adapter = MinimalAdapter()
+    assert isinstance(adapter, IssuerIdentityProvider)
 
 
 def test_identity_store_contract_accepts_non_sqlite_implementation() -> None:

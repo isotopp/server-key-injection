@@ -246,13 +246,33 @@ match `^[a-z][a-z0-9-]{0,62}$`. Inputs outside these already-lowercase ASCII
 forms are rejected rather than case-folded. Groups are stored without a prefix;
 a later certificate group principal is derived as `group:<group-name>`.
 
-All identity access is isolated behind an abstract `IdentityStore` interface.
-Its operations cover password authentication, TOTP verification, current group
-lookup, user creation, password replacement, TOTP-secret regeneration, group
-creation/removal, and group-membership changes. `SqliteIdentityStore` is the
-demo implementation. Only the issuer depends on this interface, so a
-production identity-provider implementation can replace it without changing
-certificate issuance code.
+Issuer runtime access is isolated behind small structural protocols in
+`ski.identities`, rather than requiring a production provider to implement demo
+administration. The stable issuer-facing capability consists of:
+
+- `CanonicalIdentityLookup.lookup_identity(username) -> str`: validate and
+  return the canonical identity bound to the request. Implementations reject
+  non-canonical input with a safe identity-store error and never return a
+  display-name alias for signing; authentication and snapshot lookup reject
+  unknown, disabled, or unavailable identities.
+- `IdentityAuthenticator.verify_password(...) -> bool` and
+  `verify_totp(...) -> bool`: verify the existing two factors. False and
+  backend failures are handled as the same SSH authentication denial; factor
+  values and backend details never escape to a client or log.
+- `GroupSnapshotProvider.get_group_snapshot(...) -> IdentitySnapshot`: after
+  both factors succeed, return the canonical identity and a current,
+  normalized, immutable group tuple. Failure denies issuance before key or
+  certificate work begins.
+
+`IssuerIdentityProvider` combines these three read-only capabilities for the
+SSH adapter. A production LDAP, Active Directory, or custom provider normally
+implements only this combined contract and owns its own credentials, group
+authority, transport, caching, and availability policy. It is not required to
+implement `UserAdministration` or `GroupAdministration`; those optional
+protocols are implemented only by the standalone `SqliteIdentityStore` demo
+adapter for the local `ski user` and `ski group` mutation commands. Read-only
+adapters must not expose password verifiers or TOTP secrets, and the issuer
+must fail closed for malformed, ambiguous, or unavailable responses.
 
 Production hosts do not receive a copy of the issuer's SQLite database and
 never query `IdentityStore` at login. The certificate contains the signed group
