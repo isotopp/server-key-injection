@@ -49,7 +49,9 @@ ssh-add -l || true
 In Terminal 2, start the local test issuer on the unprivileged tracer port:
 
 ```console
-uv run ski serve --bind 127.0.0.1 --port 2222
+mkdir -p /tmp/ski-smoke
+SKI_CA_DATABASE=/tmp/ski-smoke/state.sqlite3 \
+  uv run ski serve --bind 127.0.0.1 --port 2222
 ```
 
 It reports its bound address and remains in the foreground. Back in Terminal 1,
@@ -81,6 +83,14 @@ identity. Stop the server with Ctrl-C, then terminate the dedicated agent:
 
 ```console
 eval "$(ssh-agent -k)"
+```
+
+The smoke-test database is foundational service state only. Remove it when
+finished if desired:
+
+```console
+rm -f /tmp/ski-smoke/state.sqlite3 /tmp/ski-smoke/state.sqlite3.lock
+rmdir /tmp/ski-smoke 2>/dev/null || true
 ```
 
 ## Intended operation
