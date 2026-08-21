@@ -12,6 +12,7 @@ import asyncssh
 import pyotp
 import pytest
 
+from ski.ca import load_validated_active_ca
 from ski.configuration import ConfigurationError
 from ski.identities import SqliteIdentityStore
 from ski.journal import MemoryEventSink
@@ -60,7 +61,7 @@ def test_service_runtime_rejects_missing_ordinary_ca_before_ready(
     asyncio.run(exercise())
 
 
-def test_service_runtime_exposes_the_validated_persistent_ca_before_ready(
+def test_service_runtime_loads_the_validated_persistent_ca_before_ready(
     tmp_path: Path,
 ) -> None:
     """A configured listener starts only with the persisted CA material."""
@@ -75,8 +76,17 @@ def test_service_runtime_exposes_the_validated_persistent_ca_before_ready(
         )
         await runtime.start()
         try:
-            assert runtime.active_ca.record.fingerprint.startswith("SHA256:")
-            assert runtime.active_ca.private_key.get_algorithm() == "ssh-ed25519"
+            state = StateDatabase.open(tmp_path / "state.sqlite3")
+            try:
+                active_ca = load_validated_active_ca(
+                    state,
+                    private_path=tmp_path / "user_ca",
+                    public_path=tmp_path / "user_ca.pub",
+                )
+            finally:
+                state.close()
+            assert active_ca.record.fingerprint.startswith("SHA256:")
+            assert active_ca.private_key.get_algorithm() == "ssh-ed25519"
         finally:
             await runtime.close()
 
@@ -150,7 +160,11 @@ def test_service_runtime_starts_state_and_listener_before_ready_event(
         )
         await runtime.start()
         try:
-            assert runtime.state.schema_version == 4
+            state = StateDatabase.open(tmp_path / "state.sqlite3")
+            try:
+                assert state.schema_version == 4
+            finally:
+                state.close()
             assert runtime.issuer.port > 0
             ready = sink.events[-1]
             assert ready.name == "service_ready"

@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 import asyncssh
 
@@ -20,7 +21,7 @@ from ski.configuration import (
 )
 from ski.control import RuntimeControl
 from ski.credentials import OrdinaryIssuanceService
-from ski.identities import IdentitySnapshot, SqliteIdentityStore
+from ski.identities import IdentitySnapshot, IssuerIdentityProvider, SqliteIdentityStore
 from ski.injection import OrdinaryAgentInjector, TracerAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
 from ski.request_processing import AuthenticatedRequestProcessor
@@ -28,8 +29,36 @@ from ski.server import TracerIssuer
 from ski.state import StateDatabase
 
 EventSink = MemoryEventSink | ConsoleEventSink | JournalEventSink
-StateOpener = Callable[..., StateDatabase]
-IssuerFactory = Callable[..., TracerIssuer]
+
+
+class StateOpener(Protocol):
+    """Open one runtime-owned state database."""
+
+    def __call__(self, path: Path, *, owner: bool) -> StateDatabase:
+        """Open state at ``path`` with the requested ownership mode."""
+
+
+class IssuerFactory(Protocol):
+    """Construct the listener with the runtime's required boundaries."""
+
+    def __call__(
+        self,
+        *,
+        bind: str,
+        port: int,
+        request_handler: Callable[
+            [asyncssh.SSHServerConnection], Awaitable[str | None]
+        ],
+        authenticated_request_handler: Callable[
+            [asyncssh.SSHServerConnection, IdentitySnapshot], Awaitable[str | None]
+        ],
+        server_host_key: asyncssh.SSHKey,
+        identity_store: IssuerIdentityProvider,
+        active_ca: ValidatedActiveCA,
+    ) -> TracerIssuer:
+        """Construct one listener for the active runtime resources."""
+
+
 DEFAULT_SHUTDOWN_GRACE_PERIOD = 5.0
 
 
@@ -92,28 +121,12 @@ class ServiceRuntime:
         return resources.configuration
 
     @property
-    def state(self) -> StateDatabase:
-        """Return the active local state handle."""
-        resources = self._resources
-        if resources is None:
-            raise RuntimeError("service runtime is not started")
-        return resources.state
-
-    @property
     def issuer(self) -> TracerIssuer:
         """Return the active tracer issuer."""
         resources = self._resources
         if resources is None:
             raise RuntimeError("service runtime is not started")
         return resources.issuer
-
-    @property
-    def active_ca(self) -> ValidatedActiveCA:
-        """Return the validated persistent CA used by this runtime."""
-        resources = self._resources
-        if resources is None:
-            raise RuntimeError("service runtime is not started")
-        return resources.active_ca
 
     @property
     def configuration_generation(self) -> int:
