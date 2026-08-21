@@ -266,9 +266,18 @@ class SqliteIdentityStore(IdentityStore):
             record = self.get_user(username)
             if not record.enabled:
                 return False
-            return bool(
+            verified = bool(
                 self._password_hasher.verify(record.password_verifier, password)
             )
+            if verified and self._password_hasher.check_needs_rehash(
+                record.password_verifier,
+            ):
+                self._update_user(
+                    username,
+                    "password_verifier = ?",
+                    (self._password_hasher.hash(password),),
+                )
+            return verified
         except (IdentityStoreError, TypeError, VerificationError, InvalidHashError):
             return False
 

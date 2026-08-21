@@ -61,6 +61,20 @@ def build_parser() -> argparse.ArgumentParser:
     user_commands.add_parser("list", help="list demo users")
     user_show = user_commands.add_parser("show", help="show one demo user")
     user_show.add_argument("username")
+    for status in ("enable", "disable"):
+        status_parser = user_commands.add_parser(status, help=f"{status} a demo user")
+        status_parser.add_argument("username")
+    password = user_commands.add_parser("password", help="manage a user password")
+    password_commands = password.add_subparsers(dest="password_command", required=True)
+    password_set = password_commands.add_parser("set", help="replace a password")
+    password_set.add_argument("username")
+    totp = user_commands.add_parser("totp", help="manage a user TOTP secret")
+    totp_commands = totp.add_subparsers(dest="totp_command", required=True)
+    totp_regenerate = totp_commands.add_parser(
+        "regenerate",
+        help="replace a TOTP secret",
+    )
+    totp_regenerate.add_argument("username")
     return parser
 
 
@@ -156,6 +170,98 @@ def _run_user_list(*, output: TextIO) -> None:
         database.close()
 
 
+def _run_user_status(
+    username: str,
+    *,
+    enabled: bool,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    """Change one user's enabled state and notify after commit."""
+    database, store = _open_identity_store()
+    try:
+        user = store.set_user_enabled(username, enabled)
+        notification = notifier.notify_after_mutation()
+        status = "enabled" if user.enabled else "disabled"
+        print(f"User {user.username} is {status}.", file=output)
+        if not notification.succeeded:
+            print(
+                "User committed, but service notification failed; retry notification.",
+                file=output,
+            )
+            raise SystemExit(
+                "ski: service notification failed; mutation committed; "
+                "retry notification",
+            )
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: user status change failed: {exc}") from exc
+    finally:
+        database.close()
+
+
+def _run_user_password_set(
+    username: str,
+    *,
+    secret_reader: Callable[[str], str],
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    """Replace one password through concealed input and notify after commit."""
+    database, store = _open_identity_store()
+    try:
+        password = secret_reader("New password: ")
+        user = store.replace_password(username, password)
+        notification = notifier.notify_after_mutation()
+        print(f"Password updated: {user.username}", file=output)
+        if not notification.succeeded:
+            print(
+                "Password committed, but service notification failed; "
+                "retry notification.",
+                file=output,
+            )
+            raise SystemExit(
+                "ski: service notification failed; mutation committed; "
+                "retry notification",
+            )
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: password replacement failed: {exc}") from exc
+    finally:
+        database.close()
+
+
+def _run_user_totp_regenerate(
+    username: str,
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    """Replace one TOTP secret and display its enrollment material once."""
+    database, store = _open_identity_store()
+    try:
+        user = store.replace_totp_secret(username, _new_totp_secret())
+        notification = notifier.notify_after_mutation()
+        uri = pyotp.TOTP(user.totp_secret).provisioning_uri(
+            name=user.username,
+            issuer_name="ski",
+        )
+        print(f"TOTP regenerated: {user.username}", file=output)
+        print(f"TOTP secret: {user.totp_secret}", file=output)
+        print(f"TOTP URI: {uri}", file=output)
+        if not notification.succeeded:
+            print(
+                "TOTP committed, but service notification failed; retry notification.",
+                file=output,
+            )
+            raise SystemExit(
+                "ski: service notification failed; mutation committed; "
+                "retry notification",
+            )
+    except IdentityStoreError as exc:
+        raise SystemExit(f"ski: TOTP replacement failed: {exc}") from exc
+    finally:
+        database.close()
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -183,3 +289,31 @@ def main(
         )
     elif args.command == "user" and args.user_command == "list":
         _run_user_list(output=output if output is not None else sys.stdout)
+    elif args.command == "user" and args.user_command in {"enable", "disable"}:
+        _run_user_status(
+            args.username,
+            enabled=args.user_command == "enable",
+            notifier=ServiceReloadNotifier() if notifier is None else notifier,
+            output=output if output is not None else sys.stdout,
+        )
+    elif (
+        args.command == "user"
+        and args.user_command == "password"
+        and args.password_command == "set"
+    ):
+        _run_user_password_set(
+            args.username,
+            secret_reader=getpass.getpass if secret_reader is None else secret_reader,
+            notifier=ServiceReloadNotifier() if notifier is None else notifier,
+            output=output if output is not None else sys.stdout,
+        )
+    elif (
+        args.command == "user"
+        and args.user_command == "totp"
+        and args.totp_command == "regenerate"
+    ):
+        _run_user_totp_regenerate(
+            args.username,
+            notifier=ServiceReloadNotifier() if notifier is None else notifier,
+            output=output if output is not None else sys.stdout,
+        )

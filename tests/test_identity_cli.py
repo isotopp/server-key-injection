@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import pyotp
 import pytest
 
 from ski.cli import build_parser, main
@@ -237,5 +238,134 @@ def test_user_add_duplicate_is_atomic_and_does_not_notify(
         assert tuple(
             user.username for user in SqliteIdentityStore(database).list_users()
         ) == ("alice",)
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["user", "add", "--help"],
+        ["user", "show", "--help"],
+        ["user", "list", "--help"],
+        ["user", "enable", "--help"],
+        ["user", "disable", "--help"],
+        ["user", "password", "set", "--help"],
+        ["user", "totp", "regenerate", "--help"],
+    ],
+)
+def test_identity_command_help_never_opens_the_database(
+    command: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every identity command documents itself before any state access."""
+    with pytest.raises(SystemExit, match="0"):
+        build_parser().parse_args(command)
+    assert "usage:" in capsys.readouterr().out
+
+
+def test_user_enable_disable_preserves_credentials_and_groups(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Account status commands change only eligibility."""
+    database_path = tmp_path / "state.sqlite3"
+    monkeypatch.setenv("SKI_CA_DATABASE", str(database_path))
+    database = StateDatabase.open(database_path)
+    try:
+        store = SqliteIdentityStore(database)
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        store.create_group("ops")
+        store.add_membership("ops", "alice")
+        original = store.get_user("alice")
+    finally:
+        database.close()
+
+    notifier = ServiceReloadNotifier(_ActiveServiceManager())
+    main(["user", "disable", "alice"], notifier=notifier, output=io.StringIO())
+    main(["user", "enable", "alice"], notifier=notifier, output=io.StringIO())
+
+    database = StateDatabase.open(database_path)
+    try:
+        updated = SqliteIdentityStore(database).get_user("alice")
+        assert updated.enabled
+        assert updated.password_verifier == original.password_verifier
+        assert updated.totp_secret == original.totp_secret
+        assert updated.groups == original.groups == ("ops",)
+    finally:
+        database.close()
+
+
+def test_user_password_set_replaces_verifier_without_exposing_secret(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Password replacement accepts only concealed input and rotates verification."""
+    database_path = tmp_path / "state.sqlite3"
+    monkeypatch.setenv("SKI_CA_DATABASE", str(database_path))
+    database = StateDatabase.open(database_path)
+    try:
+        store = SqliteIdentityStore(database)
+        original = store.create_user("alice", "old-password", "JBSWY3DPEHPK3PXP")
+        old_verifier = original.password_verifier
+    finally:
+        database.close()
+
+    new_password = "new-password"
+    output = io.StringIO()
+    main(
+        ["user", "password", "set", "alice"],
+        secret_reader=lambda prompt: new_password,
+        notifier=ServiceReloadNotifier(_ActiveServiceManager()),
+        output=output,
+    )
+    assert new_password not in output.getvalue()
+    assert "$argon2id$" not in output.getvalue()
+
+    database = StateDatabase.open(database_path)
+    try:
+        store = SqliteIdentityStore(database)
+        updated = store.get_user("alice")
+        assert updated.password_verifier != old_verifier
+        assert not store.verify_password("alice", "old-password")
+        assert store.verify_password("alice", new_password)
+    finally:
+        database.close()
+
+
+def test_user_totp_regenerate_replaces_secret_and_displays_new_enrollment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """TOTP regeneration atomically invalidates the prior secret."""
+    database_path = tmp_path / "state.sqlite3"
+    monkeypatch.setenv("SKI_CA_DATABASE", str(database_path))
+    database = StateDatabase.open(database_path)
+    try:
+        store = SqliteIdentityStore(database)
+        original = store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        old_secret = original.totp_secret
+        old_code = pyotp.TOTP(old_secret).now()
+    finally:
+        database.close()
+
+    output = io.StringIO()
+    main(
+        ["user", "totp", "regenerate", "alice"],
+        notifier=ServiceReloadNotifier(_ActiveServiceManager()),
+        output=output,
+    )
+    rendered = output.getvalue()
+    assert "TOTP secret:" in rendered
+    assert "otpauth://" in rendered
+    assert old_secret not in rendered
+
+    database = StateDatabase.open(database_path)
+    try:
+        store = SqliteIdentityStore(database)
+        updated = store.get_user("alice")
+        assert updated.totp_secret != old_secret
+        assert not store.verify_totp("alice", old_code)
+        assert store.verify_totp("alice", pyotp.TOTP(updated.totp_secret).now())
     finally:
         database.close()

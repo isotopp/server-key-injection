@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import cast
 
+import pyotp
 import pytest
+from argon2 import PasswordHasher
 
 from ski.identities import (
     IdentityAlreadyExistsError,
@@ -197,3 +200,72 @@ def test_identity_store_contract_accepts_non_sqlite_implementation() -> None:
     snapshot = authenticate_request(fixture, "alice")
     assert snapshot.username == "alice"
     assert snapshot.groups == ("ops",)
+
+
+def test_successful_password_verification_rehashes_outdated_parameters(
+    tmp_path: Path,
+) -> None:
+    """Only a verified password may replace an outdated Argon2 verifier."""
+
+    class RehashingHasher:
+        def __init__(self) -> None:
+            self.hash_calls = 0
+
+        def hash(self, password: str) -> str:
+            assert password == "password"
+            self.hash_calls += 1
+            return "$argon2id$new"
+
+        def verify(self, verifier: str, password: str) -> bool:
+            return (
+                verifier in {"$argon2id$new", "$argon2id$old"}
+                and password == "password"
+            )
+
+        def check_needs_rehash(self, verifier: str) -> bool:
+            return verifier == "$argon2id$old"
+
+    database = StateDatabase.open(tmp_path / "state.sqlite3")
+    try:
+        hasher = RehashingHasher()
+        store = SqliteIdentityStore(
+            database,
+            password_hasher=cast(PasswordHasher, hasher),
+        )
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        connection = database._connection  # noqa: SLF001
+        connection.execute(
+            "UPDATE users SET password_verifier = '$argon2id$old' "
+            "WHERE username = 'alice'",
+        )
+        connection.commit()
+
+        assert store.verify_password("alice", "wrong") is False
+        assert store.get_user("alice").password_verifier == "$argon2id$old"
+        assert store.verify_password("alice", "password") is True
+        assert store.get_user("alice").password_verifier == "$argon2id$new"
+        assert hasher.hash_calls == 2
+    finally:
+        database.close()
+
+
+def test_failed_credential_replacement_preserves_prior_working_material(
+    tmp_path: Path,
+) -> None:
+    """Malformed replacements never partially replace a working credential."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3")
+    try:
+        store = SqliteIdentityStore(database)
+        original = store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        with pytest.raises(IdentityValidationError):
+            store.replace_password("alice", "")
+        with pytest.raises(IdentityValidationError):
+            store.replace_totp_secret("alice", "")
+
+        current = store.get_user("alice")
+        assert current.password_verifier == original.password_verifier
+        assert current.totp_secret == original.totp_secret
+        assert store.verify_password("alice", "password")
+        assert store.verify_totp("alice", pyotp.TOTP(original.totp_secret).now())
+    finally:
+        database.close()
