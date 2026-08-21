@@ -52,10 +52,12 @@ async def serve_foreground(*, bind: str, port: int) -> None:
         bind=bind,
         port=port,
     )
-    await runtime.start()
+    remove_signal_handlers = runtime.install_signal_handlers()
     try:
-        await asyncio.Event().wait()
+        await runtime.start()
+        await runtime.wait_for_shutdown()
     finally:
+        remove_signal_handlers()
         await runtime.close()
 
 

@@ -127,3 +127,84 @@ def test_listener_start_failure_releases_state_ownership(tmp_path: Path) -> None
         assert sink.events[-1].name == "service_start_failed"
 
     asyncio.run(exercise())
+
+
+def test_shutdown_drains_an_in_flight_request_before_releasing_state(
+    tmp_path: Path,
+) -> None:
+    """Graceful close waits for bounded request completion after admission stops."""
+
+    async def exercise() -> None:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            event_sink=MemoryEventSink(),
+        )
+        await runtime.start()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def request() -> None:
+            async with runtime.request_scope():
+                started.set()
+                await release.wait()
+
+        request_task = asyncio.create_task(request())
+        await started.wait()
+        close_task = asyncio.create_task(runtime.close(grace_period=1.0))
+        await asyncio.sleep(0)
+        assert not close_task.done()
+
+        release.set()
+        await request_task
+        await close_task
+
+    asyncio.run(exercise())
+
+
+def test_shutdown_cancels_requests_beyond_the_grace_period(tmp_path: Path) -> None:
+    """A request beyond the bound is cancelled before state release."""
+
+    async def exercise() -> None:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            event_sink=MemoryEventSink(),
+        )
+        await runtime.start()
+        entered = asyncio.Event()
+
+        async def request() -> None:
+            async with runtime.request_scope():
+                entered.set()
+                await asyncio.Event().wait()
+
+        request_task = asyncio.create_task(request())
+        await entered.wait()
+        await runtime.close(grace_period=0.01)
+
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    asyncio.run(exercise())
+
+
+def test_shutdown_request_wakes_the_foreground_waiter(tmp_path: Path) -> None:
+    """A signal callback can wake the foreground service loop."""
+
+    async def exercise() -> None:
+        runtime = ServiceRuntime(
+            bind="127.0.0.1",
+            port=0,
+            exported_environment={"SKI_CA_DATABASE": str(tmp_path / "state.sqlite3")},
+            event_sink=MemoryEventSink(),
+        )
+        await runtime.start()
+        waiter = asyncio.create_task(runtime.wait_for_shutdown())
+        runtime.request_shutdown()
+        await waiter
+        await runtime.close()
+
+    asyncio.run(exercise())

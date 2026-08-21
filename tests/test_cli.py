@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
 import pytest
 
 from ski.cli import build_parser, main
@@ -43,3 +51,46 @@ def test_version_does_not_require_service_configuration(
         main(["--version"])
 
     assert capsys.readouterr().out.startswith("ski ")
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_serve_exits_cleanly_on_service_signal(
+    tmp_path: Path,
+    signum: signal.Signals,
+) -> None:
+    """The foreground executable handles both service stop signals."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    environment = os.environ.copy()
+    environment["SKI_CA_DATABASE"] = str(tmp_path / "state.sqlite3")
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from ski.cli import main; main()",
+            "serve",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        output = ""
+        while time.monotonic() < deadline and "service_ready" not in output:
+            output += process.stderr.readline() if process.stderr is not None else ""
+        assert "service_ready" in output
+
+        process.send_signal(signum)
+        assert process.wait(timeout=5) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
