@@ -9,6 +9,7 @@ from pathlib import Path
 import asyncssh
 import pytest
 
+from ski.migrations import CURRENT_SCHEMA_VERSION
 from ski.state import (
     StateDatabase,
     StateError,
@@ -327,7 +328,7 @@ def test_state_database_reopens_idempotently(tmp_path: Path) -> None:
     first.close()
     second = StateDatabase.open(database_path, owner=True)
     try:
-        assert second.schema_version == 4
+        assert second.schema_version == CURRENT_SCHEMA_VERSION
     finally:
         second.close()
 

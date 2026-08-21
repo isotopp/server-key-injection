@@ -14,6 +14,7 @@ from typing import TextIO, cast
 
 import asyncssh
 
+from ski.migrations import CURRENT_SCHEMA_VERSION, create_schema_v4
 from ski.policy import (
     ORDINARY_CERTIFICATE_LIFETIME,
     PolicyValidationError,
@@ -21,7 +22,7 @@ from ski.policy import (
     validate_username,
 )
 
-SUPPORTED_SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 _SERIAL_MAX = 2**64 - 1
 
 
@@ -278,111 +279,11 @@ class StateDatabase:
 
         connection.execute("BEGIN IMMEDIATE")
         try:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS ski_schema ("
-                "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
-                "version INTEGER NOT NULL"
-                ")",
-            )
-            connection.execute(
-                "INSERT INTO ski_schema (singleton, version) VALUES (1, ?)",
-                (SUPPORTED_SCHEMA_VERSION,),
-            )
-            StateDatabase._create_host_key_table(connection)
-            StateDatabase._create_identity_tables(connection)
-            StateDatabase._create_ca_tables(connection)
+            create_schema_v4(connection)
             connection.commit()
         except Exception:
             connection.rollback()
             raise
-
-    @staticmethod
-    def _create_host_key_table(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS ssh_host_keys ("
-            "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
-            "algorithm TEXT NOT NULL, "
-            "private_key BLOB NOT NULL, "
-            "public_key BLOB NOT NULL, "
-            "fingerprint TEXT NOT NULL"
-            ")",
-        )
-
-    @staticmethod
-    def _create_identity_tables(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS users ("
-            "username TEXT PRIMARY KEY, "
-            "password_verifier TEXT NOT NULL, "
-            "totp_secret TEXT NOT NULL, "
-            "enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))"
-            ")",
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS groups (name TEXT PRIMARY KEY)",
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS user_groups ("
-            "username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE, "
-            "group_name TEXT NOT NULL REFERENCES groups(name) ON DELETE CASCADE, "
-            "PRIMARY KEY (username, group_name)"
-            ")",
-        )
-
-    @staticmethod
-    def _create_ca_tables(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS ca_keys ("
-            "ca_id INTEGER PRIMARY KEY, "
-            "algorithm TEXT NOT NULL CHECK (algorithm = 'ssh-ed25519'), "
-            "public_key BLOB NOT NULL, "
-            "fingerprint TEXT NOT NULL UNIQUE, "
-            "private_key_path TEXT NOT NULL, "
-            "activated_at INTEGER NOT NULL, "
-            "status TEXT NOT NULL CHECK (status IN ('active', 'retired'))"
-            ")",
-        )
-        connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ca_keys_one_active "
-            "ON ca_keys (status) WHERE status = 'active'",
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS certificates ("
-            "certificate_id INTEGER PRIMARY KEY, "
-            "ca_id INTEGER NOT NULL REFERENCES ca_keys(ca_id), "
-            "serial TEXT NOT NULL, "
-            "identity TEXT NOT NULL, "
-            "public_key_fingerprint TEXT NOT NULL, "
-            "principals TEXT NOT NULL, "
-            "valid_after INTEGER NOT NULL, "
-            "valid_before INTEGER NOT NULL, "
-            "request_id TEXT NOT NULL, "
-            "outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failed')), "
-            "UNIQUE (ca_id, serial)"
-            ")",
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS events ("
-            "event_id INTEGER PRIMARY KEY, "
-            "occurred_at INTEGER NOT NULL, "
-            "kind TEXT NOT NULL, "
-            "decision TEXT NOT NULL, "
-            "request_id TEXT NOT NULL, "
-            "identity TEXT, "
-            "ca_id INTEGER REFERENCES ca_keys(ca_id), "
-            "serial TEXT"
-            ")",
-        )
-        connection.execute(
-            "CREATE TRIGGER IF NOT EXISTS events_no_update "
-            "BEFORE UPDATE ON events BEGIN "
-            "SELECT RAISE(ABORT, 'events are append-only'); END",
-        )
-        connection.execute(
-            "CREATE TRIGGER IF NOT EXISTS events_no_delete "
-            "BEFORE DELETE ON events BEGIN "
-            "SELECT RAISE(ABORT, 'events are append-only'); END",
-        )
 
     @property
     def host_key(self) -> HostKeyMaterial:
