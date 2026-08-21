@@ -845,6 +845,50 @@ class StateDatabase:
         ).fetchall()
         return tuple(self._event_record_from_row(row) for row in rows)
 
+    def verify_ca_state(self) -> None:
+        """Verify SQLite integrity and all persisted CA/certificate relationships."""
+        try:
+            integrity = self._connection.execute("PRAGMA integrity_check").fetchone()
+        except sqlite3.DatabaseError as exc:
+            raise StateError("SQLite integrity is unavailable") from exc
+        if integrity != ("ok",):
+            raise StateError("SQLite integrity check failed")
+        ca_records = self.list_ca_keys()
+        ca_ids = {record.ca_id for record in ca_records}
+        if sum(record.status == "active" for record in ca_records) > 1:
+            raise StateError("multiple active CA records exist")
+        certificates = self.list_certificates()
+        certificate_keys = {
+            (record.ca_id, record.serial, record.request_id, record.identity)
+            for record in certificates
+        }
+        events = self.list_events()
+        for event in events:
+            if event.ca_id is not None and event.ca_id not in ca_ids:
+                raise StateError("event references an unknown CA")
+            if event.serial is not None:
+                if event.ca_id is None or not any(
+                    certificate.ca_id == event.ca_id
+                    and certificate.serial == event.serial
+                    for certificate in certificates
+                ):
+                    raise StateError("event references an unknown certificate")
+        for certificate in certificates:
+            if certificate.ca_id not in ca_ids:
+                raise StateError("certificate references an unknown CA")
+            if certificate.outcome == "success" and not any(
+                event.kind == "certificate_issued"
+                and event.decision == "allow"
+                and event.ca_id == certificate.ca_id
+                and event.serial == certificate.serial
+                and event.request_id == certificate.request_id
+                and event.identity == certificate.identity
+                for event in events
+            ):
+                raise StateError("certificate success event is missing")
+        if len(certificate_keys) != len(certificates):
+            raise StateError("duplicate certificate state exists")
+
     @staticmethod
     def _validate_ca_public_key(public_key: bytes, fingerprint: str) -> asyncssh.SSHKey:
         if not isinstance(public_key, bytes) or not public_key:

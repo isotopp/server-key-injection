@@ -2,13 +2,13 @@
 
 > [!WARNING]
 > **Incomplete test server — do not deploy.** The current implementation is a
-> demo-only issuer with SQLite-backed password/TOTP identities and an
-> in-memory, one-hour disposable CA. It does not issue persistent 25-hour
-> certificates, and no production host trusts the credentials it creates.
+> demo-only issuer with SQLite-backed password/TOTP identities and a locally
+> protected persistent Ed25519 CA. It issues 25-hour ordinary certificates,
+> but no production host trusts the credentials it creates yet.
 
-`ski` will issue short-lived, signed SSH certificates and load them into a
-user's existing `ssh-agent`. The currently implemented tracer proves the
-end-to-end agent-forwarding path only.
+`ski` issues short-lived, signed SSH certificates and loads them into a user's
+existing `ssh-agent`. The current demo proves the end-to-end password/TOTP,
+certificate, persistence, and agent-forwarding path only.
 
 ## Installation
 
@@ -50,11 +50,19 @@ In Terminal 2, start the local test issuer on the unprivileged tracer port:
 
 ```console
 mkdir -p /tmp/ski-smoke
-SKI_CA_DATABASE=/tmp/ski-smoke/state.sqlite3 \
-  uv run ski user add test-user
+# Configure a disposable local CA and database. Parent directories must exist.
+export SKI_CA_DATABASE=/tmp/ski-smoke/state.sqlite3
+export SKI_CA_PRIVATE_KEY=/tmp/ski-smoke/user_ca
+export SKI_CA_PUBLIC_KEY=/tmp/ski-smoke/user_ca.pub
+export SKI_CA_KRL=/tmp/ski-smoke/revoked.krl
+export ORDINARY_CERT_EXTENSIONS=pty
+
+uv run ski ca init
+uv run ski ca show
+uv run ski ca public-key
+uv run ski user add test-user
 # Save the displayed Base32 TOTP secret for the login below.
-SKI_CA_DATABASE=/tmp/ski-smoke/state.sqlite3 \
-  uv run ski serve --bind 127.0.0.1 --port 2222
+uv run ski serve --bind 127.0.0.1 --port 2222
 ```
 
 It reports its bound address and remains in the foreground. Back in Terminal 1,
@@ -68,7 +76,8 @@ ssh -A -tt -p 2222 \
 ```
 
 Enter the enrollment password and the current six-digit TOTP generated from
-the displayed secret. The issuer reports `Key loaded: test-...`, followed by
+the displayed secret. The issuer reports a line beginning with
+`Key loaded: test-user serial=... valid-until=...`, followed by
 `Groups: (none)`, and closes the session. Verify the local agent:
 
 ```console
@@ -76,10 +85,10 @@ ssh-add -l
 ```
 
 The agent displays an `ED25519` key identity and an `ED25519-CERT` identity
-with the same `test-...` comment. They are the private key and its matching
-signed user certificate; together they are one usable credential. The agent
-removes them after one hour. This certificate is not accepted by any production
-host.
+with the same `ski:test-user:...` ownership marker. They are the private key
+and its matching signed user certificate; together they are one usable
+credential. The agent lifetime is bounded by the 25-hour certificate expiry.
+This certificate is not accepted by any production host.
 
 To test that forwarding is required, repeat the SSH command with
 `-o ForwardAgent=no`. It must report `Agent forwarding is required.` and add no
@@ -89,22 +98,23 @@ identity. Stop the server with Ctrl-C, then terminate the dedicated agent:
 eval "$(ssh-agent -k)"
 ```
 
-The smoke-test database is foundational service state only. Remove it when
-finished if desired:
+The smoke-test directory contains the database, CA private/public files, and
+empty KRL. Remove it when finished if desired:
 
 ```console
-rm -f /tmp/ski-smoke/state.sqlite3 /tmp/ski-smoke/state.sqlite3.lock
+rm -f /tmp/ski-smoke/state.sqlite3 /tmp/ski-smoke/state.sqlite3.lock \
+  /tmp/ski-smoke/user_ca /tmp/ski-smoke/user_ca.pub /tmp/ski-smoke/revoked.krl
 rmdir /tmp/ski-smoke 2>/dev/null || true
 ```
 
 ## Intended operation
 
-The next planned milestone replaces the disposable test CA with one configured,
-persistent SSH user-CA. It will add `ski ca` initialization, public-key
-inspection, and redacted CA-log commands; it will issue 25-hour-by-default
-certificates containing the canonical user and normalized group principals.
-Those certificates will still not be accepted by a production host until the
-later offline host-authorization work is complete.
+The demo CA is configured through the dotenv search path and initialized with
+`ski ca init`. `ski ca show`, `ski ca public-key`, `ski ca log list`, and
+`ski ca log verify` expose only public or redacted state. Ordinary certificates
+contain the canonical user and normalized group principals and are valid for
+exactly 25 hours. Production-host trust and offline authorization remain later
+work.
 
 The issuer generates each user identity in memory and adds it through the
 user's explicitly forwarded agent connection. It will not write that generated

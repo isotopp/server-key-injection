@@ -15,7 +15,8 @@ state.
 sudo useradd --system --home-dir /home/ski --create-home \
   --shell /usr/sbin/nologin ski
 sudo install -d -o ski -g ski -m 0700 /var/lib/ski
-sudo install -d -o root -g ski -m 0750 /etc/ski /etc/ski/keys
+sudo install -d -o root -g ski -m 0750 /etc/ski
+sudo install -d -o ski -g ski -m 0700 /etc/ski/keys
 ```
 
 Install the distro's systemd development/runtime package before installing the
@@ -46,16 +47,31 @@ sudo install -o root -g ski -m 0640 /dev/null /etc/ski/env
 sudoedit /etc/ski/env
 ```
 
-At minimum, set a database whose parent already exists:
+Set the database, persistent Ed25519 CA paths, and ordinary extension policy;
+all parent directories must already exist:
 
 ```dotenv
 SKI_CA_DATABASE=/var/lib/ski/ca.sqlite3
+SKI_CA_PRIVATE_KEY=/etc/ski/keys/user_ca
+SKI_CA_PUBLIC_KEY=/etc/ski/keys/user_ca.pub
+SKI_CA_KRL=/var/lib/ski/revoked.krl
+ORDINARY_CERT_EXTENSIONS=pty
 ```
 
-Future CA key material belongs in a separately provisioned, readable-by-`ski`
-path under `/etc/ski/keys`; `ProtectSystem=strict` and `ReadOnlyPaths=/etc/ski`
-keep it read-only to the service. Do not put private keys in the unit file or
-commit `/etc/ski/env` to the repository.
+Initialize the CA once, while the service is stopped, using the same
+configuration file. The command refuses existing material and prints only the
+public fingerprint:
+
+```console
+sudo -u ski -H /home/ski/.local/bin/ski ca init
+sudo -u ski -H /home/ski/.local/bin/ski ca show
+sudo -u ski -H /home/ski/.local/bin/ski ca public-key
+```
+
+The private CA file belongs in a separately protected, readable-by-`ski` path
+under `/etc/ski/keys`; `ProtectSystem=strict` and `ReadOnlyPaths=/etc/ski` keep
+it read-only to the daemon. Do not put private keys in the unit file or commit
+`/etc/ski/env` to the repository.
 
 ## Install and operate the unit
 

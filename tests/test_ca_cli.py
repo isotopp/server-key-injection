@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import sqlite3
 import stat
 import subprocess
 from pathlib import Path
@@ -165,6 +166,61 @@ def test_ca_init_notification_failure_preserves_durable_success(
         assert database.get_active_ca() is not None
     finally:
         database.close()
+
+
+def test_ca_log_list_filters_redacted_events_and_verify_checks_consistency(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """CA logs are bounded public views and verification is read-only."""
+    for key, value in _ca_environment(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    main(
+        ["ca", "init"],
+        notifier=ServiceReloadNotifier(_StoppedServiceManager()),
+        output=io.StringIO(),
+    )
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+    try:
+        ca = database.get_active_ca()
+        assert ca is not None
+        database.record_certificate_with_event(
+            ca_id=ca.ca_id,
+            serial=7,
+            identity="alice",
+            public_key_fingerprint="SHA256:user-key",
+            principals=("alice", "group:platform-ops"),
+            valid_after=1_700_000_000,
+            valid_before=1_700_000_000 + 25 * 60 * 60,
+            request_id="request-ordinary-1",
+        )
+    finally:
+        database.close()
+
+    listed = io.StringIO()
+    main(
+        ["ca", "log", "list", "--user", "alice", "--serial", "7"],
+        output=listed,
+    )
+    rendered = listed.getvalue()
+    assert "certificate_issued" in rendered
+    assert "alice" in rendered
+    assert "serial=7" in rendered
+    assert "SHA256:user-key" not in rendered
+    assert "BEGIN" not in rendered
+
+    verified = io.StringIO()
+    main(["ca", "log", "verify"], output=verified)
+    assert verified.getvalue() == "CA state verified.\n"
+
+    connection = sqlite3.connect(tmp_path / "state.sqlite3")
+    connection.execute(
+        "UPDATE certificates SET request_id = 'tampered' WHERE serial = '7'",
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(SystemExit, match="verification failed"):
+        main(["ca", "log", "verify"], output=io.StringIO())
 
 
 def test_ca_file_writer_cleans_all_targets_when_rename_fails(tmp_path: Path) -> None:
