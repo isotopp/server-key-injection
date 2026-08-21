@@ -5,7 +5,8 @@
 This review identifies structural changes which can make the current codebase
 easier to change without altering its public behaviour. It is intentionally
 written as input to a later ticket step: each accepted finding has evidence, a
-target boundary, test expectations, and candidate delivery slices.
+target boundary, test expectations, candidate delivery slices, and a reserved
+per-finding ticket filename. This review does not create those ticket files.
 
 This is security-relevant software. A refactor is not permission to change
 authentication, certificate contents, certificate lifetime, extension policy,
@@ -28,16 +29,42 @@ The review covered all production modules under `src/ski/`, their dependencies,
 and the test support under `tests/`. It did not propose new features from later
 architecture epics.
 
+## Accepted cross-cutting decisions
+
+- All eight findings are accepted. The later ticket step will create one file
+  per finding, named `tickets-r1.md` through `tickets-r8.md`, and will preserve
+  the dependency order documented below.
+- The stable compatibility surfaces are the CLI, the SSH protocol and user
+  experience, and the issuer-facing identity interfaces defined by R3. There
+  are currently no external Python API consumers, so internal classes and
+  import paths do not require compatibility aliases.
+- SQLite schema compatibility begins at version 4. Versions 1 through 3 were
+  unpublished development artifacts and may be rejected rather than migrated.
+  Current code must reject a schema newer than it understands.
+- The target dependency direction is: CLI and SSH adapters depend on
+  application services; application services depend on domain policy and
+  narrow protocols; SQLite, AsyncSSH, systemd, and journald are outer adapters.
+  Domain policy must not import CLI or runtime modules.
+- A lightweight architecture regression test should enforce the most important
+  dependency rules, including no production access to
+  `StateDatabase._connection` and no duplicate definitions of core certificate
+  policy. No architecture framework dependency is warranted for these rules.
+- Module size and repeated setup are prompts for deliberately scheduled manual
+  reviews, not automated line-count failures.
+- Keep ordered migrations implemented with the Python standard library and
+  SQLite. Reconsider migration tooling only if a future backend or migration
+  becomes complex enough to justify it.
+
 ## Baseline
 
-| Module | Lines | Current responsibilities |
-| --- | ---: | --- |
-| `src/ski/state.py` | 1,057 | database ownership, locking, schema creation and migration, host-key generation and validation, CA records, certificate records, event records, integrity verification, transactions |
-| `src/ski/cli.py` | 753 | parser construction, command dispatch, service loop, CA workflows, identity workflows, rendering, error translation, service notification |
-| `src/ski/identities.py` | 488 | identity contracts, public records, validation, password hashing, TOTP verification, all SQLite identity and group operations |
-| `src/ski/runtime.py` | 422 | startup, resource construction, reload, shutdown, signal handling, request tracking, issuance request orchestration, event emission |
-| `src/ski/server.py` | 293 | AsyncSSH listeners, keyboard-interactive authentication, session protocol, user-facing response rendering |
-| `src/ski/credentials.py` | 265 | ordinary signing, issuance persistence service, serial retry, failure logging, and legacy disposable tracer credentials |
+| Module                   | Lines | Current responsibilities                                                                                                                                                             |
+|--------------------------|------:|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `src/ski/state.py`       | 1,057 | database ownership, locking, schema creation and migration, host-key generation and validation, CA records, certificate records, event records, integrity verification, transactions |
+| `src/ski/cli.py`         |   753 | parser construction, command dispatch, service loop, CA workflows, identity workflows, rendering, error translation, service notification                                            |
+| `src/ski/identities.py`  |   488 | identity contracts, public records, validation, password hashing, TOTP verification, all SQLite identity and group operations                                                        |
+| `src/ski/runtime.py`     |   422 | startup, resource construction, reload, shutdown, signal handling, request tracking, issuance request orchestration, event emission                                                  |
+| `src/ski/server.py`      |   293 | AsyncSSH listeners, keyboard-interactive authentication, session protocol, user-facing response rendering                                                                            |
+| `src/ski/credentials.py` |   265 | ordinary signing, issuance persistence service, serial retry, failure logging, and legacy disposable tracer credentials                                                              |
 
 Line count is evidence of accumulated responsibility, not an acceptance
 criterion. `ca.py`, `configuration.py`, `environment.py`, `journal.py`, and
@@ -49,7 +76,8 @@ Every ticket generated from this review must identify the public behaviour it
 preserves and prove it with one vertical red-green-refactor cycle at a time.
 Across the epic, the following must remain true:
 
-- existing SQLite schema versions open or migrate exactly as documented;
+- SQLite schema version 4 opens unchanged, supported future migrations are
+  ordered, and unsupported older or newer versions fail safely;
 - daemon single-instance locking, startup cleanup, reload, and bounded shutdown
   retain their current ordering;
 - password and TOTP failures remain indistinguishable and fail closed;
@@ -64,12 +92,16 @@ Across the epic, the following must remain true:
   secrets, and agent payloads never appear in output, errors, or logs;
 - CLI command forms, exit status, redaction, and stdout/stderr text remain
   stable unless separately approved;
+- the issuer-facing identity interfaces defined by R3 remain the only intended
+  stable Python integration surface;
 - the full formatter, linter, type checker, and test suite pass after every
   refactoring ticket.
 
 ## Finding R1 — Split the SQLite state monolith by persistence domain
 
 **Priority:** High
+
+**Status:** Accepted; future ticket artifact `tickets-r1.md`
 
 **Evidence.** `StateDatabase` begins at `src/ski/state.py:194` and owns the
 connection, filesystem lock, migrations, three table families, host private-key
@@ -101,14 +133,19 @@ and limits belong in the relevant adapter.
 
 Do not create a generic repository framework. The useful boundary is a small
 number of domain-specific operations with validated records, not a wrapper for
-every SQL statement.
+every SQL statement. Treat schema version 4 as the compatibility baseline and
+remove the unpublished version 1 through 3 migration branches. Keep future
+migrations explicit and ordered, and continue to reject schemas newer than the
+running code. Do not add a migration framework at this stage.
 
 **Candidate ticket slices.**
 
-1. Characterize opening new and existing schema versions, ownership locking,
+1. Characterize opening a new database and schema version 4, safe rejection of
+   versions 1 through 3 and unknown newer versions, ownership locking,
    rollback, and idempotent close through current public APIs.
-2. Extract ordered schema migrations without changing schema version 4 or any
-   SQL definition.
+2. Establish version 4 as the migration baseline, remove unpublished legacy
+   migrations, and extract the ordered migration mechanism without changing
+   the version 4 SQL definition.
 3. Expose a public SQLite unit-of-work/query boundary and remove all production
    access to `StateDatabase._connection`.
 4. Extract identity persistence, followed by host-key persistence, then CA and
@@ -119,13 +156,16 @@ every SQL statement.
    preserving every existing rejection.
 
 **Done when.** No production module accesses a private database connection;
-`state.py` no longer owns every persistence domain; migration compatibility and
-transaction atomicity remain covered through public APIs; a bounded log request
-does bounded storage work.
+`state.py` no longer owns every persistence domain; version 4 compatibility,
+unsupported-version rejection, and transaction atomicity remain covered
+through public APIs; a bounded log request does bounded storage work; the
+accepted architecture regression test guards the new boundary.
 
 ## Finding R2 — Make the CLI a thin adapter over command workflows
 
 **Priority:** High
+
+**Status:** Accepted; future ticket artifact `tickets-r2.md`
 
 **Evidence.** `build_parser()` spans `src/ski/cli.py:38-127`, command
 implementations occupy most of lines 169-639, and `main()` contains a long
@@ -177,6 +217,8 @@ existing CLI tests continue to exercise the same public `main()` interface.
 
 **Priority:** High
 
+**Status:** Accepted; future ticket artifact `tickets-r3.md`
+
 **Evidence.** `IdentityStore` exposes fifteen abstract methods at
 `src/ski/identities.py:78-139`, combining authentication, group snapshots,
 secret-bearing user retrieval, user administration, and group administration.
@@ -191,11 +233,19 @@ currently receive secrets it must remember not to render. The wide interface
 is shallow for both runtime and tests, and it obscures which capabilities a
 caller is allowed to use.
 
-**Recommendation.** Define narrow structural protocols for issuer
-authentication/group lookup and for demo administration. Use safe summary/view
-records for list/show operations. Keep password verifiers and TOTP secrets in a
-SQLite-adapter-internal record. The SQLite adapter may implement both protocols,
-while a future production adapter implements only the runtime contract.
+**Recommendation.** Define a narrow, stable set of issuer-facing structural
+protocols for authentication, canonical identity lookup, and group snapshots.
+These read-only integration interfaces are the documented extension point for
+LDAP, Active Directory, and custom organizational identity systems. Such
+backends remain authoritative for their users and groups and are not required
+to support mutation through `ski`.
+
+Define separate, optional user- and group-administration protocols for the
+standalone SQLite demo. Use safe summary/view records for list/show operations.
+Keep password verifiers and TOTP secrets in a SQLite-adapter-internal record.
+The SQLite adapter implements both the issuer-facing read interfaces and the
+demo administration interfaces; a production adapter normally implements only
+the read interfaces and manages data through its native system.
 
 Do not combine password and TOTP into a new authentication behaviour during
 this refactor. The current two-prompt exchange and failure normalization are
@@ -207,17 +257,24 @@ part of the regression contract.
    authenticated SSH exchange and backend-failure denial.
 2. Introduce safe user detail and summary records, then migrate `user show` and
    `user list` away from secret-bearing `UserRecord`.
-3. Split runtime and administration protocols and narrow each caller's type.
+3. Split the stable issuer-facing read protocols from the optional SQLite demo
+   administration protocols and narrow each caller's type.
 4. Move SQLite identity SQL behind the persistence boundary from R1 while
    keeping Argon2/TOTP policy in the identity adapter.
+5. Document the minimum read-only adapter contract for LDAP, Active Directory,
+   or a custom identity system without implementing those integrations.
 
 **Done when.** Runtime code cannot call demo administration methods; list/show
 commands cannot receive authentication secrets; a production adapter has a
-small issuer-facing contract; all authentication failures remain fail closed.
+small, documented, stable issuer-facing contract; administration capability is
+optional and confined to the standalone SQLite demo; all authentication
+failures remain fail closed.
 
 ## Finding R4 — Give one workflow ownership of issuance and agent compensation
 
 **Priority:** High; security-sensitive
+
+**Status:** Accepted; future ticket artifact `tickets-r4.md`
 
 **Evidence.** `OrdinaryIssuanceService.issue()` at
 `src/ski/credentials.py:175` owns serial retry and failure recording, but the
@@ -267,6 +324,8 @@ uncommitted credential remains after failure.
 
 **Priority:** Medium
 
+**Status:** Accepted; future ticket artifact `tickets-r5.md`
+
 **Evidence.** `ServiceRuntime` starts at `src/ski/runtime.py:42`, initializes
 fourteen mutable fields, constructs every concrete runtime dependency in
 `start()` at lines 111-179, validates reloads, installs signal handlers, tracks
@@ -309,6 +368,8 @@ acquisition; start/reload/close behaviour remains unchanged.
 
 **Priority:** Medium
 
+**Status:** Accepted for removal; future ticket artifact `tickets-r6.md`
+
 **Evidence.** The live runtime still creates `TracerAgentInjector`, exposes
 `_handle_tracer_request`, and constructs `TracerIssuer` with both anonymous and
 authenticated handlers (`src/ski/runtime.py:24-26`, 75, and 149-150). With the
@@ -316,7 +377,9 @@ runtime's mandatory identity store, the anonymous handler is not selected after
 a successful login. `server.py` still describes the listener as an in-memory
 test issuer, and `credentials.py` describes itself as disposable even though
 ordinary issuance is now its primary responsibility. Tracer names occur across
-the live server, runtime, credentials, and injection modules.
+the live server, runtime, credentials, and injection modules. Legacy tracer
+classes are also used by tests; these references must be migrated or deleted,
+but do not make the obsolete path a supported compatibility surface.
 
 **Why it matters.** Legacy names conceal which path is authoritative, and the
 unused runtime path increases the number of credential behaviours reviewers
@@ -324,29 +387,39 @@ must reason about. Later epics could accidentally add production functionality
 to a tracer abstraction or preserve dummy behaviour as an unintended public
 contract.
 
-**Recommendation.** Decide whether the anonymous tracer remains a supported
-developer feature. If not, remove it from `ServiceRuntime` and keep any needed
-protocol fixture under test support until its tests are migrated. Rename the
-live listener and request types around issuer terminology. If compatibility is
-needed, use a temporary alias for one epic rather than maintaining two
-implementations.
+**Recommendation.** Remove all behavior introduced solely for the Epic 1
+anonymous disposable tracer. Remove it from `ServiceRuntime`, delete tracer
+credential and injector implementations, and replace or delete tests which
+exercise only that obsolete behavior. Rename the live listener and request
+types around ordinary issuer terminology and remove stale tracer references
+from current documentation.
+
+No compatibility alias is required: there are no external Python users, and
+the stable surfaces are the CLI, SSH behavior, and the R3 identity interfaces.
+Before deleting a tracer test, confirm that any still-relevant SSH or agent
+protocol behavior is covered through the ordinary authenticated path.
 
 **Candidate ticket slices.**
 
 1. Prove that `uv run ski serve` uses only the authenticated ordinary path.
 2. Remove the anonymous tracer handler and injector from `ServiceRuntime`.
-3. Move disposable credential tests behind an explicit test/demo boundary or
-   delete them if no longer required.
+3. Replace still-relevant tracer-only protocol coverage with ordinary
+   authenticated coverage, then delete disposable credential and injection
+   implementations and obsolete tests.
 4. Rename the live server/session types and update stale module documentation,
-   retaining a temporary alias only if the open question below requires it.
+   README text, and architecture references which incorrectly describe current
+   behavior as a tracer.
 
 **Done when.** Production runtime dependencies and names describe the ordinary
-issuer path; dummy issuance cannot be reached accidentally; retained demo code
-has an explicit owner and lifecycle.
+issuer path; no Epic 1 disposable credential path remains in production code,
+tests, or current-operation documentation; relevant SSH and agent behavior
+remains covered through the ordinary path.
 
 ## Finding R7 — Centralize domain policy and use typed domain failures
 
 **Priority:** Medium
+
+**Status:** Accepted; future ticket artifact `tickets-r7.md`
 
 **Evidence.** The 25-hour lifetime is defined independently as
 `CERTIFICATE_LIFETIME` in `configuration.py:16` and
@@ -379,14 +452,19 @@ module or a hierarchy of one-field wrapper classes.
    signing, and persistence validation consume the same policy value.
 4. Add typed persistence errors for duplicate serial and other expected
    conflict conditions, then remove message matching.
+5. Add a lightweight architecture regression test which rejects duplicate
+   definitions of core certificate policy.
 
 **Done when.** Each security-relevant invariant has one authoritative
 definition; all boundaries still validate untrusted or persisted data; control
-flow does not depend on human-readable error text.
+flow does not depend on human-readable error text; the accepted architecture
+test protects the single-source policy boundary.
 
 ## Finding R8 — Build shared public-behaviour test fixtures
 
 **Priority:** Medium
+
+**Status:** Accepted; future ticket artifact `tickets-r8.md`
 
 **Evidence.** `tests/test_authenticated_injection.py` is 579 lines,
 `tests/test_runtime.py` is 590 lines, and `tests/test_identity_cli.py` is 504
@@ -431,72 +509,23 @@ reliable, and production private attributes are not test APIs.
 
 ## Recommended ticket-generation order
 
-If all findings are accepted, generate tickets in this dependency order:
+All findings are accepted. In a later ticket step, create the reserved ticket
+files in this dependency order:
 
-1. Extract only the test fixtures needed by the first production refactor from
-   R8; continue expanding them vertically as later tickets need them.
-2. Centralize domain policy and typed conflict errors from R7.
-3. Establish the SQLite unit-of-work and domain persistence boundaries from R1.
-4. Narrow runtime and administration identity contracts from R3.
-5. Consolidate the issuance/agent workflow from R4.
-6. Move application workflows out of the CLI and split command adapters from
-   R2.
-7. Simplify runtime resource ownership and request handling from R5.
-8. Remove or isolate the tracer path from R6 once its compatibility decision is
-   explicit.
+1. `tickets-r8.md`: extract only the test fixtures needed by the first
+   production refactor, then expand them vertically as later tickets require.
+2. `tickets-r7.md`: centralize domain policy and typed conflict errors.
+3. `tickets-r1.md`: establish the SQLite unit-of-work and domain persistence
+   boundaries, with schema version 4 as the compatibility baseline.
+4. `tickets-r3.md`: define the stable read-only issuer identity interfaces and
+   separate optional SQLite demo administration capabilities.
+5. `tickets-r4.md`: consolidate the issuance and agent-compensation workflow.
+6. `tickets-r2.md`: move application workflows out of the CLI and split command
+   adapters.
+7. `tickets-r5.md`: simplify runtime resource ownership and request handling.
+8. `tickets-r6.md`: migrate any still-relevant coverage to the ordinary path,
+   then remove the obsolete Epic 1 tracer without compatibility aliases.
 
 Each ticket should move one vertical behaviour-preserving slice, run the full
 suite, and be committed before the next ticket. Avoid a ticket which merely
 creates empty packages or moves all files before behaviour is exercised.
-
-## Open questions
-
-1. **Is the anonymous disposable tracer still a supported developer interface,
-   or may it be removed once the ordinary issuer smoke test covers the same
-   protocol path?**
-
-   **Recommendation:** remove it from `ServiceRuntime`. Retain a clearly named
-   test fixture temporarily only where it still provides distinct coverage.
-   The ordinary authenticated path is now the shipped behaviour, and keeping a
-   second runtime issuance mode increases security review cost.
-
-2. **Must external Python callers retain imports such as `TracerIssuer`,
-   `StateDatabase`, and `IdentityStore`, or is the CLI the only compatibility
-   surface?**
-
-   **Recommendation:** treat the CLI and SSH behaviour as stable; treat these
-   Python names as internal for now. If external callers exist, keep explicit
-   one-epic aliases and removal notes instead of freezing the current module
-   layout indefinitely.
-
-3. **Must databases created by every prior schema version remain upgradeable,
-   or may pre-production databases be recreated?**
-
-   **Recommendation:** preserve the current version 1 through 4 upgrade path.
-   The cost is small today, and migration extraction is safer when tested
-   against real prior versions. Reconsider only through a deliberate data
-   compatibility decision.
-
-4. **Should the future production identity backend expose administration
-   through this CLI?**
-
-   **Recommendation:** no. Keep demo SQLite administration as a separate
-   capability. The daemon-facing production identity protocol should contain
-   only authentication and group snapshot operations, leaving external
-   directory administration to its authoritative system.
-
-## Suggestions
-
-- Document a dependency rule for the target structure: CLI and SSH adapters
-  depend on application services; application services depend on domain policy
-  and narrow protocols; SQLite, AsyncSSH, systemd, and journald implementations
-  are outer adapters. Domain policy must not import CLI or runtime modules.
-- Add a small architecture regression test, using the standard library if
-  practical, which rejects production access to `StateDatabase._connection`
-  and duplicate definitions of core certificate policy. Do not add a heavy
-  architecture framework for two rules.
-- Use module size and repeated setup as review triggers, not hard line-count
-  gates. Cohesion and dependency direction are the acceptance criteria.
-- Do not add a migration framework yet. Ordered stdlib SQLite migrations are
-  adequate for the current single-database deployment; revisit tooling only
-  when another database backend or a genuinely complex migration requires it.
