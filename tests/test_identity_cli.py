@@ -144,6 +144,24 @@ def test_user_show_not_found_keeps_safe_exit_and_empty_output(
     assert output.getvalue() == ""
 
 
+def test_read_only_identity_workflows_release_database_on_success_and_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Read-only command workflows release SQLite ownership on every result."""
+    database_path = tmp_path / "state.sqlite3"
+    monkeypatch.setenv("SKI_CA_DATABASE", str(database_path))
+
+    main(["user", "list"], output=io.StringIO())
+    database = StateDatabase.open(database_path, owner=True)
+    database.close()
+
+    with pytest.raises(SystemExit, match="unable to show user"):
+        main(["user", "show", "missing"], output=io.StringIO())
+    database = StateDatabase.open(database_path, owner=True)
+    database.close()
+
+
 def test_user_mutation_requires_optional_administration_capability(
     monkeypatch,
     tmp_path: Path,

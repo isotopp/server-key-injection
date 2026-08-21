@@ -24,6 +24,8 @@ from ski.identities import (
     SqliteIdentityStore,
     UserAdministration,
 )
+from ski.identity_commands import list_users as list_identity_users
+from ski.identity_commands import show_user as show_identity_user
 from ski.notify import ServiceReloadNotifier
 from ski.policy import PolicyValidationError, validate_username
 from ski.runtime import ServiceRuntime
@@ -439,9 +441,8 @@ def _run_user_add(
 
 def _run_user_show(username: str, *, output: TextIO) -> None:
     """Render one user's non-secret status and group snapshot."""
-    database, store = _open_identity_store()
     try:
-        user = store.get_user_detail(username)
+        user = show_identity_user(username)
         status = "enabled" if user.enabled else "disabled"
         groups = ", ".join(user.groups) if user.groups else "(none)"
         print(f"User: {user.username}", file=output)
@@ -449,21 +450,16 @@ def _run_user_show(username: str, *, output: TextIO) -> None:
         print(f"Groups: {groups}", file=output)
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: unable to show user: {exc}") from exc
-    finally:
-        database.close()
 
 
 def _run_user_list(*, output: TextIO) -> None:
     """Render all users with only canonical names and status."""
-    database, store = _open_identity_store()
     try:
-        for user in store.list_users():
+        for user in list_identity_users():
             status = "enabled" if user.enabled else "disabled"
             print(f"{user.username} {status}", file=output)
     except IdentityStoreError as exc:
         raise SystemExit(f"ski: unable to list users: {exc}") from exc
-    finally:
-        database.close()
 
 
 def _run_user_status(
