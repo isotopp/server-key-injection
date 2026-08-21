@@ -15,6 +15,7 @@ from ski.credentials import (
     OrdinaryIssuanceService,
 )
 from ski.identities import IdentitySnapshot
+from ski.policy import PolicyValidationError, validate_principals
 from ski.state import CertificateRecord, StateError
 
 
@@ -132,7 +133,10 @@ class OrdinaryAgentInjector:
             principals = getattr(certificate, "principals", None)
         except Exception:
             return False
-        principal_values = tuple(principals or ())
+        try:
+            principal_values = validate_principals(tuple(principals or ()))
+        except PolicyValidationError:
+            return False
         if (
             not isinstance(serial, int)
             or not isinstance(key_id, str)
@@ -141,10 +145,6 @@ class OrdinaryAgentInjector:
             or signing_key.get_fingerprint() != self._active_ca.record.fingerprint
             or not principal_values
             or principal_values[0] != username
-            or any(
-                not isinstance(principal, str) or not principal.startswith("group:")
-                for principal in principal_values[1:]
-            )
         ):
             return False
         marker = f"ski:{username}:{self._active_ca.record.fingerprint}:{serial}"

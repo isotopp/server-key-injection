@@ -20,6 +20,7 @@ from ski.ca import CAFileError, CAFileWriter
 from ski.configuration import ConfigurationError, load_runtime_configuration
 from ski.identities import IdentityStoreError, SqliteIdentityStore
 from ski.notify import ServiceReloadNotifier
+from ski.policy import PolicyValidationError, validate_username
 from ski.runtime import ServiceRuntime
 from ski.state import EventRecord, StateDatabase, StateError
 
@@ -309,8 +310,11 @@ def _run_ca_log_list(
     database: StateDatabase | None = None
     try:
         serial_value = _parse_log_serial(serial)
-        if user is not None and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", user) is None:
-            raise ValueError("user filter is malformed")
+        if user is not None:
+            try:
+                validate_username(user)
+            except PolicyValidationError as exc:
+                raise ValueError("user filter is malformed") from exc
         if event is not None and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", event) is None:
             raise ValueError("event filter is malformed")
         from_value = _parse_log_time(from_time)

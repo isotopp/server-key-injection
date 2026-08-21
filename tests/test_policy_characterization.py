@@ -15,6 +15,7 @@ from ski.identities import (
     IdentityValidationError,
     SqliteIdentityStore,
 )
+from ski.policy import PolicyValidationError, build_principals, validate_principals
 from ski.state import StateDatabase, StateError
 from support import runtime_environment
 
@@ -118,3 +119,15 @@ def test_persistence_rejects_duplicate_serials_and_wrong_lifetimes(
             )
     finally:
         database.close()
+
+
+def test_principal_policy_canonicalizes_groups_and_rejects_duplicates() -> None:
+    """Principal construction and validation share canonical identity grammar."""
+    principals = build_principals("alice", ("platform-ops",))
+    assert principals == ("alice", "group:platform-ops")
+    assert validate_principals(principals) == principals
+
+    with pytest.raises(PolicyValidationError):
+        build_principals("alice", ("Platform-ops",))
+    with pytest.raises(PolicyValidationError):
+        validate_principals(("alice", "alice"))

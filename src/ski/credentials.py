@@ -11,6 +11,7 @@ import asyncssh
 
 from ski.ca import ValidatedActiveCA
 from ski.identities import IdentitySnapshot
+from ski.policy import PolicyValidationError, build_principals
 from ski.state import (
     ORDINARY_CERTIFICATE_LIFETIME,
     CertificateRecord,
@@ -99,10 +100,10 @@ class OrdinaryCertificateFactory:
 
     def issue(self, identity: IdentitySnapshot) -> OrdinaryIdentity:
         """Generate and sign one fresh certificate for an immutable identity."""
-        principals = (
-            identity.username,
-            *(f"group:{group}" for group in identity.groups),
-        )
+        try:
+            principals = build_principals(identity.username, identity.groups)
+        except PolicyValidationError as exc:
+            raise StateError("ordinary identity principals are malformed") from exc
         serial = self._serial_allocator()
         if not isinstance(serial, int) or not 0 <= serial < 2**64:
             raise StateError("certificate serial is malformed")

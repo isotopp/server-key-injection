@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fcntl
 import json
-import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,10 +14,11 @@ from typing import TextIO, cast
 
 import asyncssh
 
+from ski.policy import PolicyValidationError, validate_principals, validate_username
+
 SUPPORTED_SCHEMA_VERSION = 4
 ORDINARY_CERTIFICATE_LIFETIME = 25 * 60 * 60
 _SERIAL_MAX = 2**64 - 1
-_IDENTITY_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 
 
 @dataclass(frozen=True)
@@ -122,22 +122,17 @@ def _validate_serial(value: object) -> int:
 
 
 def _validate_identity(value: object) -> str:
-    if not isinstance(value, str) or _IDENTITY_PATTERN.fullmatch(value) is None:
-        raise StateError("identity is not canonical")
-    return value
+    try:
+        return validate_username(value)
+    except PolicyValidationError as exc:
+        raise StateError("identity is not canonical") from exc
 
 
 def _validate_principals(value: object) -> tuple[str, ...]:
-    if not isinstance(value, tuple) or not value:
-        raise StateError("certificate principals are malformed")
-    if any(
-        not isinstance(principal, str) or not principal or "\x00" in principal
-        for principal in value
-    ):
-        raise StateError("certificate principals are malformed")
-    if len(set(value)) != len(value):
-        raise StateError("certificate principals contain duplicates")
-    return value
+    try:
+        return validate_principals(value)
+    except PolicyValidationError as exc:
+        raise StateError(str(exc)) from exc
 
 
 def _validate_outcome(value: object) -> str:

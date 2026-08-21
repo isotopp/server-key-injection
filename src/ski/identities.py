@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
@@ -14,10 +13,16 @@ import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
+from ski.policy import (
+    PolicyValidationError,
+)
+from ski.policy import (
+    validate_group_name as _validate_group_name,
+)
+from ski.policy import (
+    validate_username as _validate_username,
+)
 from ski.state import StateDatabase
-
-USERNAME_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
-GROUP_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,62}\Z")
 
 
 class IdentityStoreError(RuntimeError):
@@ -141,16 +146,18 @@ class IdentityStore(ABC):
 
 def validate_username(username: str) -> str:
     """Validate one already-canonical ASCII username."""
-    if not isinstance(username, str) or USERNAME_PATTERN.fullmatch(username) is None:
-        raise IdentityValidationError("username is not canonical")
-    return username
+    try:
+        return _validate_username(username)
+    except PolicyValidationError as exc:
+        raise IdentityValidationError("username is not canonical") from exc
 
 
 def validate_group_name(name: str) -> str:
     """Validate one already-canonical ASCII group name."""
-    if not isinstance(name, str) or GROUP_PATTERN.fullmatch(name) is None:
-        raise IdentityValidationError("group name is not canonical")
-    return name
+    try:
+        return _validate_group_name(name)
+    except PolicyValidationError as exc:
+        raise IdentityValidationError("group name is not canonical") from exc
 
 
 class SqliteIdentityStore(IdentityStore):
