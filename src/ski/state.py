@@ -14,6 +14,17 @@ from typing import TextIO, cast
 
 import asyncssh
 
+from ski.ca_persistence import (
+    active_ca_row,
+    ca_rows,
+    certificate_rows,
+    event_rows,
+    insert_ca,
+    insert_ca_with_event,
+    insert_certificate,
+    insert_event,
+)
+from ski.host_persistence import insert_host_key, load_host_key_row
 from ski.migrations import CURRENT_SCHEMA_VERSION, create_schema_v4
 from ski.policy import (
     ORDINARY_CERTIFICATE_LIFETIME,
@@ -291,24 +302,10 @@ class StateDatabase:
         if self._host_key is not None:
             return self._host_key
 
-        row = self._connection.execute(
-            "SELECT algorithm, private_key, public_key, fingerprint "
-            "FROM ssh_host_keys WHERE singleton = 1",
-        ).fetchone()
+        row = load_host_key_row(self)
         if row is None:
             material = self._new_host_key()
-            with self.transaction() as connection:
-                connection.execute(
-                    "INSERT INTO ssh_host_keys "
-                    "(singleton, algorithm, private_key, public_key, fingerprint) "
-                    "VALUES (1, ?, ?, ?, ?)",
-                    (
-                        material.algorithm,
-                        material.private_key,
-                        material.public_key,
-                        material.fingerprint,
-                    ),
-                )
+            insert_host_key(self, material)
             self._host_key = material
             return material
 
@@ -385,20 +382,16 @@ class StateDatabase:
         path = self._validate_private_key_path(private_key_path)
         timestamp = _timestamp(activated_at)
         try:
-            with self.transaction() as connection:
-                cursor = connection.execute(
-                    "INSERT INTO ca_keys "
-                    "(algorithm, public_key, fingerprint, private_key_path, "
-                    "activated_at, status) VALUES (?, ?, ?, ?, ?, 'active')",
-                    (
-                        key.get_algorithm(),
-                        key.export_public_key(),
-                        fingerprint,
-                        str(path),
-                        timestamp,
-                    ),
-                )
-                ca_id = cursor.lastrowid
+            ca_id = insert_ca(
+                self,
+                {
+                    "algorithm": key.get_algorithm(),
+                    "public_key": key.export_public_key(),
+                    "fingerprint": fingerprint,
+                    "private_key_path": str(path),
+                    "activated_at": timestamp,
+                },
+            )
         except sqlite3.IntegrityError as exc:
             raise StateError("an active CA is already registered") from exc
         if ca_id is None:
@@ -428,28 +421,19 @@ class StateDatabase:
         timestamp = _timestamp(activated_at)
         request_id = _validate_text(request_id, "request id")
         try:
-            with self.transaction() as connection:
-                cursor = connection.execute(
-                    "INSERT INTO ca_keys "
-                    "(algorithm, public_key, fingerprint, private_key_path, "
-                    "activated_at, status) VALUES (?, ?, ?, ?, ?, 'active')",
-                    (
-                        key.get_algorithm(),
-                        key.export_public_key(),
-                        fingerprint,
-                        str(path),
-                        timestamp,
-                    ),
-                )
-                ca_id = cursor.lastrowid
-                if ca_id is None:
-                    raise StateError("active CA registration did not return an id")
-                connection.execute(
-                    "INSERT INTO events "
-                    "(occurred_at, kind, decision, request_id, ca_id) "
-                    "VALUES (?, 'ca_initialized', 'allow', ?, ?)",
-                    (timestamp, request_id, ca_id),
-                )
+            ca_id = insert_ca_with_event(
+                self,
+                {
+                    "algorithm": key.get_algorithm(),
+                    "public_key": key.export_public_key(),
+                    "fingerprint": fingerprint,
+                    "private_key_path": str(path),
+                    "activated_at": timestamp,
+                    "request_id": request_id,
+                },
+            )
+            if ca_id is None:
+                raise StateError("active CA registration did not return an id")
         except sqlite3.IntegrityError as exc:
             raise StateError("an active CA is already registered") from exc
         return CAKeyRecord(
@@ -464,20 +448,14 @@ class StateDatabase:
 
     def get_active_ca(self) -> CAKeyRecord | None:
         """Return the validated active public CA record, if one exists."""
-        row = self._connection.execute(
-            "SELECT ca_id, algorithm, public_key, fingerprint, private_key_path, "
-            "activated_at, status FROM ca_keys WHERE status = 'active'",
-        ).fetchone()
+        row = active_ca_row(self)
         if row is None:
             return None
         return self._ca_record_from_row(row)
 
     def list_ca_keys(self) -> tuple[CAKeyRecord, ...]:
         """Return all validated CA records in stable activation order."""
-        rows = self._connection.execute(
-            "SELECT ca_id, algorithm, public_key, fingerprint, private_key_path, "
-            "activated_at, status FROM ca_keys ORDER BY activated_at, ca_id",
-        ).fetchall()
+        rows = ca_rows(self)
         return tuple(self._ca_record_from_row(row) for row in rows)
 
     def record_certificate(
@@ -517,25 +495,20 @@ class StateDatabase:
             outcome=outcome,
         )
         try:
-            with self.transaction() as connection:
-                cursor = connection.execute(
-                    "INSERT INTO certificates "
-                    "(ca_id, serial, identity, public_key_fingerprint, principals, "
-                    "valid_after, valid_before, request_id, outcome) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        ca_id,
-                        str(serial),
-                        identity,
-                        public_key_fingerprint,
-                        encoded_principals,
-                        valid_after,
-                        valid_before,
-                        request_id,
-                        outcome,
-                    ),
-                )
-                certificate_id = cursor.lastrowid
+            certificate_id = insert_certificate(
+                self,
+                {
+                    "ca_id": ca_id,
+                    "serial": serial,
+                    "identity": identity,
+                    "public_key_fingerprint": public_key_fingerprint,
+                    "encoded_principals": encoded_principals,
+                    "valid_after": valid_after,
+                    "valid_before": valid_before,
+                    "request_id": request_id,
+                    "outcome": outcome,
+                },
+            )
         except sqlite3.IntegrityError as exc:
             raise DuplicateCertificateSerialError(
                 "certificate serial is already recorded",
@@ -557,11 +530,7 @@ class StateDatabase:
 
     def list_certificates(self) -> tuple[CertificateRecord, ...]:
         """Return validated certificate metadata in insertion order."""
-        rows = self._connection.execute(
-            "SELECT certificate_id, ca_id, serial, identity, "
-            "public_key_fingerprint, principals, valid_after, valid_before, "
-            "request_id, outcome FROM certificates ORDER BY certificate_id",
-        ).fetchall()
+        rows = certificate_rows(self)
         return tuple(self._certificate_record_from_row(row) for row in rows)
 
     def record_certificate_with_event(
@@ -600,40 +569,23 @@ class StateDatabase:
             outcome="success",
         )
         try:
-            with self.transaction() as connection:
-                cursor = connection.execute(
-                    "INSERT INTO certificates "
-                    "(ca_id, serial, identity, public_key_fingerprint, principals, "
-                    "valid_after, valid_before, request_id, outcome) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        ca_id,
-                        str(serial),
-                        identity,
-                        public_key_fingerprint,
-                        encoded_principals,
-                        valid_after,
-                        valid_before,
-                        request_id,
-                        outcome,
-                    ),
-                )
-                certificate_id = cursor.lastrowid
-                if certificate_id is None:
-                    raise StateError("certificate record did not return an id")
-                connection.execute(
-                    "INSERT INTO events "
-                    "(occurred_at, kind, decision, request_id, identity, "
-                    "ca_id, serial) "
-                    "VALUES (?, 'certificate_issued', 'allow', ?, ?, ?, ?)",
-                    (
-                        valid_after,
-                        request_id,
-                        identity,
-                        ca_id,
-                        str(serial),
-                    ),
-                )
+            certificate_id = insert_certificate(
+                self,
+                {
+                    "ca_id": ca_id,
+                    "serial": serial,
+                    "identity": identity,
+                    "public_key_fingerprint": public_key_fingerprint,
+                    "encoded_principals": encoded_principals,
+                    "valid_after": valid_after,
+                    "valid_before": valid_before,
+                    "request_id": request_id,
+                    "outcome": outcome,
+                    "record_event": True,
+                },
+            )
+            if certificate_id is None:
+                raise StateError("certificate record did not return an id")
         except sqlite3.IntegrityError as exc:
             raise DuplicateCertificateSerialError(
                 "certificate serial is already recorded",
@@ -674,23 +626,18 @@ class StateDatabase:
             serial = _validate_serial(serial)
         timestamp = _timestamp(occurred_at)
         try:
-            with self.transaction() as connection:
-                cursor = connection.execute(
-                    "INSERT INTO events "
-                    "(occurred_at, kind, decision, request_id, identity, "
-                    "ca_id, serial) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        timestamp,
-                        kind,
-                        decision,
-                        request_id,
-                        identity,
-                        ca_id,
-                        None if serial is None else str(serial),
-                    ),
-                )
-                event_id = cursor.lastrowid
+            event_id = insert_event(
+                self,
+                {
+                    "occurred_at": timestamp,
+                    "kind": kind,
+                    "decision": decision,
+                    "request_id": request_id,
+                    "identity": identity,
+                    "ca_id": ca_id,
+                    "serial": None if serial is None else str(serial),
+                },
+            )
         except sqlite3.IntegrityError as exc:
             raise StateError("event could not be recorded") from exc
         if event_id is None:
@@ -708,10 +655,7 @@ class StateDatabase:
 
     def list_events(self) -> tuple[EventRecord, ...]:
         """Return validated append-only events in stable insertion order."""
-        rows = self._connection.execute(
-            "SELECT event_id, occurred_at, kind, decision, request_id, identity, "
-            "ca_id, serial FROM events ORDER BY event_id",
-        ).fetchall()
+        rows = event_rows(self)
         return tuple(self._event_record_from_row(row) for row in rows)
 
     def verify_ca_state(self) -> None:
