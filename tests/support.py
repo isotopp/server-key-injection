@@ -2,10 +2,51 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from ski.ca import CAFileWriter
 from ski.state import StateDatabase
+
+
+@asynccontextmanager
+async def ssh_agent() -> AsyncIterator[dict[str, str]]:
+    """Run an isolated real ``ssh-agent`` for one integration scenario."""
+    process = await asyncio.create_subprocess_exec(
+        "ssh-agent",
+        "-s",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(stderr.decode())
+
+    output = stdout.decode()
+    socket_match = re.search(r"SSH_AUTH_SOCK=([^;]+);", output)
+    pid_match = re.search(r"SSH_AGENT_PID=([^;]+);", output)
+    if socket_match is None or pid_match is None:
+        raise RuntimeError("ssh-agent did not report its environment")
+    environment = {
+        "SSH_AUTH_SOCK": socket_match.group(1),
+        "SSH_AGENT_PID": pid_match.group(1),
+    }
+    try:
+        yield environment
+    finally:
+        stop_process = await asyncio.create_subprocess_exec(
+            "ssh-agent",
+            "-k",
+            env={**os.environ, **environment},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await stop_process.communicate()
+        Path(environment["SSH_AUTH_SOCK"]).unlink(missing_ok=True)
 
 
 def runtime_environment(tmp_path: Path, database: Path) -> dict[str, str]:

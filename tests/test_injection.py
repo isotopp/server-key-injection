@@ -11,6 +11,7 @@ import asyncssh
 
 from ski.injection import TracerAgentInjector
 from ski.server import TracerIssuer
+from support import ssh_agent
 
 
 async def _start_test_agent() -> dict[str, str]:
@@ -51,45 +52,44 @@ def test_forwarded_agent_receives_the_dummy_identity() -> None:
     """A real forwarded agent receives the generated identity."""
 
     async def exercise() -> None:
-        agent_environment = await _start_test_agent()
-        issuer = TracerIssuer(
-            bind="127.0.0.1",
-            port=0,
-            request_handler=TracerAgentInjector().handle,
-        )
-        await issuer.start()
-        try:
-            async with asyncssh.connect(
-                "127.0.0.1",
-                port=issuer.port,
-                username="test-user",
-                known_hosts=None,
-                agent_path=agent_environment["SSH_AUTH_SOCK"],
-                agent_forwarding=True,
-            ) as connection:
-                process = await connection.create_process(
-                    command=None,
-                    request_pty=False,
-                )
-                stdout, stderr = await process.communicate()
-
-                assert process.exit_status == 0
-                assert stdout.startswith("Key loaded: test-")
-                assert stderr == ""
-
-            listed = await asyncio.create_subprocess_exec(
-                "ssh-add",
-                "-l",
-                env={**os.environ, **agent_environment},
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        async with ssh_agent() as agent_environment:
+            issuer = TracerIssuer(
+                bind="127.0.0.1",
+                port=0,
+                request_handler=TracerAgentInjector().handle,
             )
-            listing, errors = await listed.communicate()
-            assert listed.returncode == 0, errors.decode()
-            assert b"test-" in listing
-        finally:
-            await issuer.close()
-            await _stop_test_agent(agent_environment)
+            await issuer.start()
+            try:
+                async with asyncssh.connect(
+                    "127.0.0.1",
+                    port=issuer.port,
+                    username="test-user",
+                    known_hosts=None,
+                    agent_path=agent_environment["SSH_AUTH_SOCK"],
+                    agent_forwarding=True,
+                ) as connection:
+                    process = await connection.create_process(
+                        command=None,
+                        request_pty=False,
+                    )
+                    stdout, stderr = await process.communicate()
+
+                    assert process.exit_status == 0
+                    assert stdout.startswith("Key loaded: test-")
+                    assert stderr == ""
+
+                listed = await asyncio.create_subprocess_exec(
+                    "ssh-add",
+                    "-l",
+                    env={**os.environ, **agent_environment},
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                listing, errors = await listed.communicate()
+                assert listed.returncode == 0, errors.decode()
+                assert b"test-" in listing
+            finally:
+                await issuer.close()
 
     asyncio.run(exercise())
 
