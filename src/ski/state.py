@@ -146,6 +146,51 @@ def _validate_outcome(value: object) -> str:
     return cast(str, value)
 
 
+def _validated_certificate_fields(
+    *,
+    ca_id: int,
+    serial: int,
+    identity: str,
+    public_key_fingerprint: str,
+    principals: tuple[str, ...],
+    valid_after: int,
+    valid_before: int,
+    request_id: str,
+    outcome: str,
+) -> tuple[int, int, str, str, tuple[str, ...], int, int, str, str, str]:
+    _validate_positive_id(ca_id, "ca_id")
+    serial = _validate_serial(serial)
+    identity = _validate_identity(identity)
+    public_key_fingerprint = _validate_text(
+        public_key_fingerprint,
+        "public key fingerprint",
+    )
+    principals = _validate_principals(principals)
+    if (
+        isinstance(valid_after, bool)
+        or isinstance(valid_before, bool)
+        or not isinstance(valid_after, int)
+        or not isinstance(valid_before, int)
+        or valid_before - valid_after != ORDINARY_CERTIFICATE_LIFETIME
+    ):
+        raise StateError("certificate validity interval is not 25 hours")
+    request_id = _validate_text(request_id, "request id")
+    outcome = _validate_outcome(outcome)
+    encoded_principals = json.dumps(list(principals), separators=(",", ":"))
+    return (
+        ca_id,
+        serial,
+        identity,
+        public_key_fingerprint,
+        principals,
+        valid_after,
+        valid_before,
+        request_id,
+        outcome,
+        encoded_principals,
+    )
+
+
 class StateDatabase:
     """Own a SQLite connection and optionally the daemon instance lock."""
 
@@ -584,25 +629,28 @@ class StateDatabase:
         outcome: str,
     ) -> CertificateRecord:
         """Append one safe certificate issuance record."""
-        _validate_positive_id(ca_id, "ca_id")
-        serial = _validate_serial(serial)
-        identity = _validate_identity(identity)
-        public_key_fingerprint = _validate_text(
+        (
+            ca_id,
+            serial,
+            identity,
             public_key_fingerprint,
-            "public key fingerprint",
+            principals,
+            valid_after,
+            valid_before,
+            request_id,
+            outcome,
+            encoded_principals,
+        ) = _validated_certificate_fields(
+            ca_id=ca_id,
+            serial=serial,
+            identity=identity,
+            public_key_fingerprint=public_key_fingerprint,
+            principals=principals,
+            valid_after=valid_after,
+            valid_before=valid_before,
+            request_id=request_id,
+            outcome=outcome,
         )
-        principals = _validate_principals(principals)
-        if (
-            isinstance(valid_after, bool)
-            or isinstance(valid_before, bool)
-            or not isinstance(valid_after, int)
-            or not isinstance(valid_before, int)
-            or valid_before - valid_after != ORDINARY_CERTIFICATE_LIFETIME
-        ):
-            raise StateError("certificate validity interval is not 25 hours")
-        request_id = _validate_text(request_id, "request id")
-        outcome = _validate_outcome(outcome)
-        encoded_principals = json.dumps(list(principals), separators=(",", ":"))
         try:
             with self.transaction() as connection:
                 cursor = connection.execute(
@@ -648,6 +696,91 @@ class StateDatabase:
             "request_id, outcome FROM certificates ORDER BY certificate_id",
         ).fetchall()
         return tuple(self._certificate_record_from_row(row) for row in rows)
+
+    def record_certificate_with_event(
+        self,
+        *,
+        ca_id: int,
+        serial: int,
+        identity: str,
+        public_key_fingerprint: str,
+        principals: tuple[str, ...],
+        valid_after: int,
+        valid_before: int,
+        request_id: str,
+    ) -> CertificateRecord:
+        """Commit one successful certificate record and event atomically."""
+        (
+            ca_id,
+            serial,
+            identity,
+            public_key_fingerprint,
+            principals,
+            valid_after,
+            valid_before,
+            request_id,
+            outcome,
+            encoded_principals,
+        ) = _validated_certificate_fields(
+            ca_id=ca_id,
+            serial=serial,
+            identity=identity,
+            public_key_fingerprint=public_key_fingerprint,
+            principals=principals,
+            valid_after=valid_after,
+            valid_before=valid_before,
+            request_id=request_id,
+            outcome="success",
+        )
+        try:
+            with self.transaction() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO certificates "
+                    "(ca_id, serial, identity, public_key_fingerprint, principals, "
+                    "valid_after, valid_before, request_id, outcome) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        ca_id,
+                        str(serial),
+                        identity,
+                        public_key_fingerprint,
+                        encoded_principals,
+                        valid_after,
+                        valid_before,
+                        request_id,
+                        outcome,
+                    ),
+                )
+                certificate_id = cursor.lastrowid
+                if certificate_id is None:
+                    raise StateError("certificate record did not return an id")
+                connection.execute(
+                    "INSERT INTO events "
+                    "(occurred_at, kind, decision, request_id, identity, "
+                    "ca_id, serial) "
+                    "VALUES (?, 'certificate_issued', 'allow', ?, ?, ?, ?)",
+                    (
+                        valid_after,
+                        request_id,
+                        identity,
+                        ca_id,
+                        str(serial),
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StateError("certificate serial is already recorded") from exc
+        return CertificateRecord(
+            certificate_id=int(certificate_id),
+            ca_id=ca_id,
+            serial=serial,
+            identity=identity,
+            public_key_fingerprint=public_key_fingerprint,
+            principals=principals,
+            valid_after=valid_after,
+            valid_before=valid_before,
+            request_id=request_id,
+            outcome=outcome,
+        )
 
     def record_event(
         self,
