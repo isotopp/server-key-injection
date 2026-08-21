@@ -9,6 +9,7 @@ from typing import Any, cast
 import asyncssh
 
 TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[str | None]]
+ListenerFactory = Callable[..., Awaitable[Any]]
 
 
 class _TracerSession(asyncssh.SSHServerSession):
@@ -81,44 +82,61 @@ class TracerIssuer:
         bind: str = "*",
         port: int = 22,
         request_handler: TracerRequestHandler | None = None,
+        listener_factory: ListenerFactory | None = None,
     ) -> None:
         self.bind = bind
         self.requested_port = port
         self.request_handler = request_handler
-        self._acceptor: asyncssh.SSHAcceptor | None = None
+        self._listener_factory = (
+            asyncssh.listen if listener_factory is None else listener_factory
+        )
+        self._acceptors: list[Any] = []
 
     @property
     def addresses(self) -> list[tuple[Any, ...]]:
         """Return the listener's bound socket addresses."""
-        if self._acceptor is None:
-            return []
-        return self._acceptor.get_addresses()
+        return [
+            address
+            for acceptor in self._acceptors
+            for address in acceptor.get_addresses()
+        ]
 
     @property
     def port(self) -> int:
         """Return the active listener port, or zero before startup."""
-        if self._acceptor is None:
+        if not self._acceptors:
             return 0
-        return self._acceptor.get_port()
+        return self._acceptors[0].get_port()
 
     async def start(self) -> None:
         """Start the listener with a process-local ephemeral host key."""
-        if self._acceptor is not None:
+        if self._acceptors:
             raise RuntimeError("test issuer is already running")
 
-        listen_host = "" if self.bind == "*" else self.bind
         host_key = asyncssh.generate_private_key("ssh-ed25519")
+        hosts = ("0.0.0.0", "::") if self.bind == "*" else (self.bind,)
 
         def server_factory() -> _TracerSSHServer:
             return _TracerSSHServer(self.request_handler)
 
-        self._acceptor = await asyncssh.listen(
-            listen_host,
-            self.requested_port,
-            server_factory=server_factory,
-            server_host_keys=[host_key],
-            agent_forwarding=True,
-        )
+        opened: list[Any] = []
+        port = self.requested_port
+        try:
+            for host in hosts:
+                acceptor = await self._listener_factory(
+                    host,
+                    port,
+                    server_factory=server_factory,
+                    server_host_keys=[host_key],
+                    agent_forwarding=True,
+                )
+                opened.append(acceptor)
+                if port == 0:
+                    port = acceptor.get_port()
+        except Exception:
+            await self._close_acceptors(opened)
+            raise
+        self._acceptors = opened
 
     async def serve(self) -> None:
         """Run until cancelled, then close the listener."""
@@ -130,10 +148,15 @@ class TracerIssuer:
 
     async def close(self) -> None:
         """Stop accepting connections and release the listener."""
-        if self._acceptor is None:
+        if not self._acceptors:
             return
 
-        acceptor = self._acceptor
-        self._acceptor = None
-        acceptor.close()
-        await acceptor.wait_closed()
+        acceptors = self._acceptors
+        self._acceptors = []
+        await self._close_acceptors(acceptors)
+
+    @staticmethod
+    async def _close_acceptors(acceptors: list[Any]) -> None:
+        for acceptor in acceptors:
+            acceptor.close()
+        await asyncio.gather(*(acceptor.wait_closed() for acceptor in acceptors))
