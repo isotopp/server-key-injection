@@ -10,7 +10,7 @@ from typing import Any, cast
 import asyncssh
 
 from ski.ca import ValidatedActiveCA
-from ski.identities import IdentitySnapshot, IdentityStore
+from ski.identities import IdentitySnapshot, IssuerIdentityProvider
 
 TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[str | None]]
 AuthenticatedTracerRequestHandler = Callable[
@@ -94,7 +94,7 @@ class _TracerSSHServer(asyncssh.SSHServer):
         self,
         request_handler: TracerRequestHandler | None,
         authenticated_request_handler: AuthenticatedTracerRequestHandler | None,
-        identity_store: IdentityStore | None,
+        identity_store: IssuerIdentityProvider | None,
         clock: Callable[[], float],
     ) -> None:
         self._request_handler = request_handler
@@ -154,12 +154,13 @@ class _TracerSSHServer(asyncssh.SSHServer):
                 self._connection.abort()
             return False
         try:
+            canonical_username = self._identity_store.lookup_identity(username)
             password_ok = self._identity_store.verify_password(
-                username,
+                canonical_username,
                 responses[0],
             )
             totp_ok = self._identity_store.verify_totp(
-                username,
+                canonical_username,
                 responses[1],
                 now=int(self._clock()),
             )
@@ -168,7 +169,7 @@ class _TracerSSHServer(asyncssh.SSHServer):
                     self._connection.abort()
                 return False
             self._authenticated_identity = self._identity_store.get_group_snapshot(
-                username,
+                canonical_username,
             )
             return True
         except Exception:
@@ -198,7 +199,7 @@ class TracerIssuer:
         authenticated_request_handler: AuthenticatedTracerRequestHandler | None = None,
         listener_factory: ListenerFactory | None = None,
         server_host_key: asyncssh.SSHKey | None = None,
-        identity_store: IdentityStore | None = None,
+        identity_store: IssuerIdentityProvider | None = None,
         active_ca: ValidatedActiveCA | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:

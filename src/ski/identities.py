@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import pyotp
 from argon2 import PasswordHasher
@@ -90,12 +90,49 @@ class UserDetail:
     groups: tuple[str, ...]
 
 
+class IdentityAuthenticator(Protocol):
+    """Issuer capability for verifying the two existing authentication factors."""
+
+    def verify_password(self, username: str, password: str) -> bool:
+        """Return whether the password is valid without backend details."""
+
+    def verify_totp(self, username: str, code: str, *, now: int | None = None) -> bool:
+        """Return whether the TOTP code is valid under backend policy."""
+
+
+class CanonicalIdentityLookup(Protocol):
+    """Issuer capability for binding an input name to one canonical identity."""
+
+    def lookup_identity(self, username: str) -> str:
+        """Return the canonical identity or raise a safe identity-store error."""
+
+
+class GroupSnapshotProvider(Protocol):
+    """Issuer capability for obtaining current groups after authentication."""
+
+    def get_group_snapshot(self, username: str) -> IdentitySnapshot:
+        """Return the canonical identity and current group snapshot."""
+
+
+class IssuerIdentityProvider(
+    IdentityAuthenticator,
+    CanonicalIdentityLookup,
+    GroupSnapshotProvider,
+    Protocol,
+):
+    """Combined narrow read-only capability required by the SSH issuer."""
+
+
 class IdentityStore(ABC):
     """Backend-neutral identity and group operations used by the issuer."""
 
     @abstractmethod
     def get_user(self, username: str) -> UserRecord:
         """Return one validated user record."""
+
+    @abstractmethod
+    def lookup_identity(self, username: str) -> str:
+        """Return the canonical identity used for authentication binding."""
 
     @abstractmethod
     def get_user_detail(self, username: str) -> UserDetail:
@@ -214,6 +251,10 @@ class SqliteIdentityStore(IdentityStore):
             raise
         except Exception as exc:
             raise IdentityUnavailableError("identity data is unavailable") from exc
+
+    def lookup_identity(self, username: str) -> str:
+        """Validate and return one canonical identity name."""
+        return validate_username(username)
 
     def get_user_detail(self, username: str) -> UserDetail:
         """Return a credential-free view of one validated user."""

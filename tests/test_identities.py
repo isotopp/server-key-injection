@@ -156,6 +156,9 @@ def test_identity_store_contract_accepts_non_sqlite_implementation() -> None:
         def get_user(self, username: str) -> UserRecord:
             raise AssertionError("fixture should not use administration methods")
 
+        def lookup_identity(self, username: str) -> str:
+            raise AssertionError("fixture should not use administration methods")
+
         def get_group_snapshot(self, username: str) -> IdentitySnapshot:
             assert username == "alice"
             return IdentitySnapshot(username="alice", groups=("ops",))

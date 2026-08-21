@@ -11,7 +11,11 @@ import asyncssh
 import pyotp
 import pytest
 
-from ski.identities import IdentitySnapshot, IdentityStore, SqliteIdentityStore
+from ski.identities import (
+    IdentitySnapshot,
+    IssuerIdentityProvider,
+    SqliteIdentityStore,
+)
 from ski.journal import MemoryEventSink
 from ski.runtime import ServiceRuntime
 from ski.server import TracerIssuer
@@ -62,6 +66,10 @@ def test_authenticated_exchange_uses_only_read_identity_capabilities() -> None:
     """The SSH runtime accepts a backend without demo administration methods."""
 
     class ReadOnlyIdentityBackend:
+        def lookup_identity(self, username: str) -> str:
+            assert username == "alice"
+            return username
+
         def verify_password(self, username: str, password: str) -> bool:
             return username == "alice" and password == "password"
 
@@ -83,7 +91,7 @@ def test_authenticated_exchange_uses_only_read_identity_capabilities() -> None:
         issuer = TracerIssuer(
             bind="127.0.0.1",
             port=0,
-            identity_store=cast(IdentityStore, ReadOnlyIdentityBackend()),
+            identity_store=cast(IssuerIdentityProvider, ReadOnlyIdentityBackend()),
         )
         await issuer.start()
         try:
@@ -106,6 +114,9 @@ def test_read_only_identity_backend_failure_is_a_uniform_denial() -> None:
     """A read backend failure never opens an authenticated SSH session."""
 
     class BrokenReadOnlyIdentityBackend:
+        def lookup_identity(self, username: str) -> str:
+            return username
+
         def verify_password(self, username: str, password: str) -> bool:
             del username, password
             raise RuntimeError("backend detail")
@@ -128,7 +139,7 @@ def test_read_only_identity_backend_failure_is_a_uniform_denial() -> None:
             bind="127.0.0.1",
             port=0,
             identity_store=cast(
-                IdentityStore,
+                IssuerIdentityProvider,
                 BrokenReadOnlyIdentityBackend(),
             ),
         )
