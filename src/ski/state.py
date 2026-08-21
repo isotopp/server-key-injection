@@ -272,45 +272,6 @@ class StateDatabase:
         if row is not None:
             if row[0] > SUPPORTED_SCHEMA_VERSION:
                 raise UnsupportedSchemaError("state database schema is newer")
-            if row[0] == 1:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    StateDatabase._create_host_key_table(connection)
-                    connection.execute(
-                        "UPDATE ski_schema SET version = ? WHERE singleton = 1",
-                        (2,),
-                    )
-                    connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
-                row = (2,)
-            if row[0] == 2:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    StateDatabase._create_identity_tables(connection)
-                    connection.execute(
-                        "UPDATE ski_schema SET version = ? WHERE singleton = 1",
-                        (3,),
-                    )
-                    connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
-                row = (3,)
-            if row[0] == 3:
-                connection.execute("BEGIN IMMEDIATE")
-                try:
-                    StateDatabase._create_ca_tables(connection)
-                    connection.execute(
-                        "UPDATE ski_schema SET version = ? WHERE singleton = 1",
-                        (SUPPORTED_SCHEMA_VERSION,),
-                    )
-                    connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
-                return
             if row[0] != SUPPORTED_SCHEMA_VERSION:
                 raise StateError("state database schema version is unsupported")
             return

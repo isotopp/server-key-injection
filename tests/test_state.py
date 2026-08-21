@@ -9,7 +9,6 @@ from pathlib import Path
 import asyncssh
 import pytest
 
-from ski.identities import SqliteIdentityStore
 from ski.state import (
     StateDatabase,
     StateError,
@@ -18,10 +17,10 @@ from ski.state import (
 )
 
 
-def test_state_database_migrates_schema_three_to_persistent_ca_state(
+def test_state_database_rejects_schema_three_with_persistent_ca_state(
     tmp_path: Path,
 ) -> None:
-    """The Epic 3 state survives migration to the persistent CA schema."""
+    """A pre-baseline state database is rejected without migration."""
     database_path = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(database_path)
     connection.executescript(
@@ -58,14 +57,30 @@ def test_state_database_migrates_schema_three_to_persistent_ca_state(
     connection.commit()
     connection.close()
 
-    database = StateDatabase.open(database_path, owner=True)
-    try:
-        assert database.schema_version == 4
-        assert {"ca_keys", "certificates", "events"} <= database.table_names
-        user = SqliteIdentityStore(database).get_group_snapshot("alice")
-        assert user.groups == ("platform-ops",)
-    finally:
-        database.close()
+    with pytest.raises(StateError, match="unsupported"):
+        StateDatabase.open(database_path, owner=True)
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_state_database_rejects_unpublished_schema_versions(
+    tmp_path: Path,
+    version: int,
+) -> None:
+    """Development-only schema versions are not accepted as compatibility data."""
+    database_path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE ski_schema ("
+        "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+        "version INTEGER NOT NULL"
+        ")",
+    )
+    connection.execute("INSERT INTO ski_schema VALUES (1, ?)", (version,))
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(StateError, match="unsupported"):
+        StateDatabase.open(database_path, owner=True)
 
 
 def test_state_database_registers_one_validated_active_ca(tmp_path: Path) -> None:
@@ -317,10 +332,10 @@ def test_state_database_reopens_idempotently(tmp_path: Path) -> None:
         second.close()
 
 
-def test_state_database_migrates_foundation_to_host_key_schema(
+def test_state_database_rejects_foundation_schema(
     tmp_path: Path,
 ) -> None:
-    """An Epic 2 database gains host-key state without losing its foundation."""
+    """An unpublished foundation schema is rejected without regeneration."""
     database_path = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(database_path)
     connection.execute(
@@ -333,15 +348,8 @@ def test_state_database_migrates_foundation_to_host_key_schema(
     connection.commit()
     connection.close()
 
-    database = StateDatabase.open(database_path, owner=True)
-    try:
-        assert database.schema_version == 4
-        assert "ssh_host_keys" in database.table_names
-        assert {"users", "groups", "user_groups"} <= database.table_names
-        assert {"ca_keys", "certificates", "events"} <= database.table_names
-        assert database.host_key.fingerprint.startswith("SHA256:")
-    finally:
-        database.close()
+    with pytest.raises(StateError, match="unsupported"):
+        StateDatabase.open(database_path, owner=True)
 
 
 def test_state_database_rejects_tampered_host_identity_without_regeneration(

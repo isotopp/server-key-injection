@@ -23,20 +23,17 @@ from ski.identities import (
     UserRecord,
     UserSummary,
 )
-from ski.state import StateDatabase
+from ski.state import StateDatabase, StateError
 from support import raw_sqlite_connection
 
 
-def test_identity_store_migrates_host_key_database_with_ca_state(
+def test_identity_store_rejects_prebaseline_host_key_database(
     tmp_path: Path,
 ) -> None:
-    """Identity tables extend the host-key schema without replacing it."""
+    """Identity access refuses a pre-baseline schema without migration."""
     database_path = tmp_path / "state.sqlite3"
     database = StateDatabase.open(database_path, owner=True)
-    try:
-        original_host_key = database.host_key
-    finally:
-        database.close()
+    database.close()
 
     connection = sqlite3.connect(database_path)
     connection.execute("DROP TABLE user_groups")
@@ -46,26 +43,8 @@ def test_identity_store_migrates_host_key_database_with_ca_state(
     connection.commit()
     connection.close()
 
-    database = StateDatabase.open(database_path, owner=True)
-    try:
-        store = SqliteIdentityStore(database)
-
-        assert store.schema_version == 4
-        assert store.table_names == frozenset(
-            {
-                "ski_schema",
-                "ssh_host_keys",
-                "users",
-                "groups",
-                "user_groups",
-                "ca_keys",
-                "certificates",
-                "events",
-            },
-        )
-        assert database.host_key.fingerprint == original_host_key.fingerprint
-    finally:
-        database.close()
+    with pytest.raises(StateError, match="unsupported"):
+        StateDatabase.open(database_path, owner=True)
 
 
 def test_identity_store_rejects_noncanonical_and_duplicate_identifiers(
