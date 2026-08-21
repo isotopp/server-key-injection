@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import secrets
 import signal
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -24,6 +23,7 @@ from ski.credentials import OrdinaryIssuanceService
 from ski.identities import IdentitySnapshot, SqliteIdentityStore
 from ski.injection import OrdinaryAgentInjector, TracerAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
+from ski.request_processing import AuthenticatedRequestProcessor
 from ski.server import TracerIssuer
 from ski.state import StateDatabase
 
@@ -42,6 +42,7 @@ class RuntimeResources:
     active_ca: ValidatedActiveCA
     issuer: TracerIssuer
     ordinary_injector: OrdinaryAgentInjector
+    request_processor: AuthenticatedRequestProcessor
 
 
 def default_event_sink() -> EventSink:
@@ -154,6 +155,11 @@ class ServiceRuntime:
                     extensions=configuration.ordinary_extensions,
                 ),
             )
+            request_processor = AuthenticatedRequestProcessor(
+                ordinary_injector,
+                event_sink=self._event_sink,
+                request_scope=self.request_scope,
+            )
             identity_store = SqliteIdentityStore(state)
             issuer = self._issuer_factory(
                 bind=configuration.bind,
@@ -171,6 +177,7 @@ class ServiceRuntime:
                 active_ca=active_ca,
                 issuer=issuer,
                 ordinary_injector=ordinary_injector,
+                request_processor=request_processor,
             )
             self._configuration_generation = 1
         except Exception as exc:
@@ -243,6 +250,7 @@ class ServiceRuntime:
             active_ca=resources.active_ca,
             issuer=resources.issuer,
             ordinary_injector=resources.ordinary_injector,
+            request_processor=resources.request_processor,
         )
         self._configuration_generation += 1
         self._emit(
@@ -360,47 +368,10 @@ class ServiceRuntime:
         connection: Any,
         identity: IdentitySnapshot,
     ) -> str | None:
-        request_id = secrets.token_hex(16)
-        groups = ",".join(identity.groups) or "(none)"
-        fields = {
-            "SKI_REQUEST_ID": request_id,
-            "SKI_IDENTITY": identity.username,
-            "SKI_DECISION": "allow",
-            "SKI_GROUPS": groups,
-        }
-        try:
-            async with self.request_scope():
-                resources = self._resources
-                if resources is None:
-                    raise RuntimeError("ordinary injector is unavailable")
-                issuance = await resources.ordinary_injector.handle(
-                    connection,
-                    identity,
-                    request_id=request_id,
-                )
-                fields["SKI_CERTIFICATE_SERIAL"] = str(issuance.record.serial)
-                result = (
-                    f"{identity.username} serial={issuance.record.serial} "
-                    f"valid-until={issuance.record.valid_before}"
-                )
-        except Exception as exc:
-            self._emit(
-                "certificate_request_failed",
-                "certificate request failed",
-                fields={
-                    **fields,
-                    "SKI_DECISION": "deny",
-                    "SKI_ERROR_CODE": type(exc).__name__,
-                },
-                priority=4,
-            )
-            raise
-        self._emit(
-            "certificate_request_completed",
-            "certificate request completed",
-            fields=fields,
-        )
-        return result
+        resources = self._resources
+        if resources is None:
+            raise RuntimeError("ordinary request processor is unavailable")
+        return await resources.request_processor.handle(connection, identity)
 
     async def _drain_requests(self, grace_period: float) -> None:
         tasks = set(self._in_flight)
