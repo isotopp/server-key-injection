@@ -503,6 +503,55 @@ class StateDatabase:
             status="active",
         )
 
+    def initialize_active_ca(
+        self,
+        *,
+        public_key: bytes,
+        fingerprint: str,
+        private_key_path: Path,
+        request_id: str,
+        activated_at: int | float | datetime | None = None,
+    ) -> CAKeyRecord:
+        """Commit one active CA and its initialization event as one unit."""
+        key = self._validate_ca_public_key(public_key, fingerprint)
+        path = self._validate_private_key_path(private_key_path)
+        timestamp = _timestamp(activated_at)
+        request_id = _validate_text(request_id, "request id")
+        try:
+            with self.transaction() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO ca_keys "
+                    "(algorithm, public_key, fingerprint, private_key_path, "
+                    "activated_at, status) VALUES (?, ?, ?, ?, ?, 'active')",
+                    (
+                        key.get_algorithm(),
+                        key.export_public_key(),
+                        fingerprint,
+                        str(path),
+                        timestamp,
+                    ),
+                )
+                ca_id = cursor.lastrowid
+                if ca_id is None:
+                    raise StateError("active CA registration did not return an id")
+                connection.execute(
+                    "INSERT INTO events "
+                    "(occurred_at, kind, decision, request_id, ca_id) "
+                    "VALUES (?, 'ca_initialized', 'allow', ?, ?)",
+                    (timestamp, request_id, ca_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StateError("an active CA is already registered") from exc
+        return CAKeyRecord(
+            ca_id=int(ca_id),
+            algorithm=key.get_algorithm(),
+            public_key=key.export_public_key(),
+            fingerprint=fingerprint,
+            private_key_path=path,
+            activated_at=timestamp,
+            status="active",
+        )
+
     def get_active_ca(self) -> CAKeyRecord | None:
         """Return the validated active public CA record, if one exists."""
         row = self._connection.execute(

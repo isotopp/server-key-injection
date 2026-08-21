@@ -9,15 +9,17 @@ import getpass
 import secrets
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import TextIO
 
 import pyotp
 
-from ski.configuration import load_runtime_configuration
+from ski.ca import CAFileError, CAFileWriter
+from ski.configuration import ConfigurationError, load_runtime_configuration
 from ski.identities import IdentityStoreError, SqliteIdentityStore
 from ski.notify import ServiceReloadNotifier
 from ski.runtime import ServiceRuntime
-from ski.state import StateDatabase
+from ski.state import StateDatabase, StateError
 
 
 def _port(value: str) -> int:
@@ -93,6 +95,33 @@ def build_parser() -> argparse.ArgumentParser:
         )
         member_parser.add_argument("group")
         member_parser.add_argument("username")
+
+    ca = commands.add_parser("ca", help="manage the persistent user CA")
+    ca_commands = ca.add_subparsers(dest="ca_command", required=True)
+    ca_commands.add_parser("init", help="initialize the Ed25519 user CA")
+    ca_show = ca_commands.add_parser("show", help="show public CA status")
+    ca_show.add_argument(
+        "--all",
+        action="store_true",
+        help="show all known CA records",
+    )
+    ca_public_key = ca_commands.add_parser(
+        "public-key",
+        help="print a public CA key",
+    )
+    ca_public_key.add_argument(
+        "--fingerprint",
+        help="select a CA by fingerprint",
+    )
+    ca_log = ca_commands.add_parser("log", help="inspect CA events")
+    log_commands = ca_log.add_subparsers(dest="log_command", required=True)
+    log_list = log_commands.add_parser("list", help="list redacted CA events")
+    log_list.add_argument("--serial")
+    log_list.add_argument("--user")
+    log_list.add_argument("--event")
+    log_list.add_argument("--from", dest="from_time")
+    log_list.add_argument("--to", dest="to_time")
+    log_commands.add_parser("verify", help="verify CA state consistency")
     return parser
 
 
@@ -115,6 +144,126 @@ async def serve_foreground(*, bind: str, port: int) -> None:
 def _new_totp_secret() -> str:
     """Generate one 160-bit Base32 TOTP secret without padding."""
     return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _ca_configuration():
+    """Load the complete CA configuration for a public CA command."""
+    configuration = load_runtime_configuration(bind="127.0.0.1", port=22)
+    if (
+        configuration.ca_private_key is None
+        or configuration.ca_public_key is None
+        or configuration.ca_krl is None
+    ):
+        raise ConfigurationError("ordinary CA configuration is incomplete")
+    return configuration
+
+
+def _remove_initialized_files(paths: tuple[Path, ...]) -> None:
+    """Remove only fresh CA targets after a failed database commit."""
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+def _run_ca_init(
+    *,
+    notifier: ServiceReloadNotifier,
+    output: TextIO,
+) -> None:
+    """Initialize one configured Ed25519 CA and its empty KRL."""
+    database: StateDatabase | None = None
+    paths: tuple[Path, ...] | None = None
+    try:
+        configuration = _ca_configuration()
+        assert configuration.ca_private_key is not None
+        assert configuration.ca_public_key is not None
+        assert configuration.ca_krl is not None
+        paths = (
+            configuration.ca_private_key,
+            configuration.ca_public_key,
+            configuration.ca_krl,
+        )
+        database = StateDatabase.open(configuration.database)
+        if database.get_active_ca() is not None:
+            raise CAFileError("an active CA is already registered")
+        material = CAFileWriter().install(
+            private_path=configuration.ca_private_key,
+            public_path=configuration.ca_public_key,
+            krl_path=configuration.ca_krl,
+        )
+        try:
+            ca = database.initialize_active_ca(
+                public_key=material.public_bytes,
+                fingerprint=material.fingerprint,
+                private_key_path=configuration.ca_private_key,
+                request_id=f"ca-init-{secrets.token_hex(16)}",
+            )
+        except Exception:
+            _remove_initialized_files(paths)
+            raise
+        notification = notifier.notify_after_mutation()
+        print("CA initialized.", file=output)
+        print(f"Algorithm: {ca.algorithm}", file=output)
+        print(f"Fingerprint: {ca.fingerprint}", file=output)
+        if not notification.succeeded:
+            print(
+                "CA committed, but service notification failed; retry notification.",
+                file=output,
+            )
+            raise SystemExit(
+                "ski: CA initialized; service notification failed; retry notification",
+            )
+    except (CAFileError, ConfigurationError, StateError) as exc:
+        raise SystemExit("ski: CA initialization failed") from exc
+    finally:
+        if database is not None:
+            database.close()
+
+
+def _run_ca_show(*, show_all: bool, output: TextIO) -> None:
+    """Display redacted public CA status without notifying the daemon."""
+    database: StateDatabase | None = None
+    try:
+        configuration = _ca_configuration()
+        database = StateDatabase.open(configuration.database)
+        records = database.list_ca_keys() if show_all else ()
+        if not show_all:
+            active = database.get_active_ca()
+            records = () if active is None else (active,)
+        if not records:
+            raise SystemExit("ski: no CA is initialized")
+        for ca in records:
+            print(f"CA ID: {ca.ca_id}", file=output)
+            print(f"Algorithm: {ca.algorithm}", file=output)
+            print(f"Fingerprint: {ca.fingerprint}", file=output)
+            print(f"Status: {ca.status}", file=output)
+            print(f"Activated: {ca.activated_at}", file=output)
+    except (ConfigurationError, StateError) as exc:
+        raise SystemExit("ski: unable to show CA") from exc
+    finally:
+        if database is not None:
+            database.close()
+
+
+def _run_ca_public_key(*, fingerprint: str | None, output: TextIO) -> None:
+    """Print one selected CA public key and no private metadata."""
+    database: StateDatabase | None = None
+    try:
+        configuration = _ca_configuration()
+        database = StateDatabase.open(configuration.database)
+        records = database.list_ca_keys()
+        selected = (
+            next((ca for ca in records if ca.fingerprint == fingerprint), None)
+            if fingerprint is not None
+            else database.get_active_ca()
+        )
+        if selected is None:
+            raise SystemExit("ski: requested CA is unavailable")
+        print(selected.public_key.decode("utf-8").rstrip(), file=output)
+    except (ConfigurationError, StateError, UnicodeError) as exc:
+        raise SystemExit("ski: unable to read CA public key") from exc
+    finally:
+        if database is not None:
+            database.close()
 
 
 def _open_identity_store() -> tuple[StateDatabase, SqliteIdentityStore]:
@@ -465,3 +614,20 @@ def main(
             notifier=ServiceReloadNotifier() if notifier is None else notifier,
             output=output if output is not None else sys.stdout,
         )
+    elif args.command == "ca" and args.ca_command == "init":
+        _run_ca_init(
+            notifier=ServiceReloadNotifier() if notifier is None else notifier,
+            output=output if output is not None else sys.stdout,
+        )
+    elif args.command == "ca" and args.ca_command == "show":
+        _run_ca_show(
+            show_all=args.all,
+            output=output if output is not None else sys.stdout,
+        )
+    elif args.command == "ca" and args.ca_command == "public-key":
+        _run_ca_public_key(
+            fingerprint=args.fingerprint,
+            output=output if output is not None else sys.stdout,
+        )
+    elif args.command == "ca":
+        raise SystemExit("ski: this CA command is not implemented yet")

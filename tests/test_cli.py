@@ -25,15 +25,15 @@ def test_help_describes_certificate_issuance(
     assert "short-lived SSH certificates" in capsys.readouterr().out
 
 
-def test_cli_help_lists_only_the_current_demo_surface() -> None:
-    """The public help exposes service and demo identity commands only."""
+def test_cli_help_lists_the_current_service_and_identity_surface() -> None:
+    """The public help exposes service, identity, and CA commands."""
     help_text = build_parser().format_help()
-    for command in ("serve", "user", "group"):
+    for command in ("serve", "user", "group", "ca"):
         assert command in help_text
     command_line = next(
         line for line in help_text.splitlines() if line.startswith("  {")
     )
-    assert command_line == "  {serve,user,group}"
+    assert command_line == "  {serve,user,group,ca}"
 
 
 def test_serve_accepts_tracer_listener_options() -> None:
@@ -43,6 +43,36 @@ def test_serve_accepts_tracer_listener_options() -> None:
     assert args.command == "serve"
     assert args.bind == "127.0.0.1"
     assert args.port == 2222
+
+
+def test_ca_parser_exposes_only_the_epic_four_public_commands() -> None:
+    """CA commands have public inspection and initialization surfaces only."""
+    parser = build_parser()
+
+    init = parser.parse_args(["ca", "init"])
+    assert (init.command, init.ca_command) == ("ca", "init")
+
+    show = parser.parse_args(["ca", "show", "--all"])
+    assert show.all
+
+    public_key = parser.parse_args(
+        ["ca", "public-key", "--fingerprint", "SHA256:ca"],
+    )
+    assert public_key.fingerprint == "SHA256:ca"
+
+    log_list = parser.parse_args(
+        ["ca", "log", "list", "--serial", "7", "--event", "certificate_issued"],
+    )
+    assert (log_list.ca_command, log_list.log_command) == ("log", "list")
+    assert (log_list.serial, log_list.event) == ("7", "certificate_issued")
+
+    verify = parser.parse_args(["ca", "log", "verify"])
+    assert (verify.ca_command, verify.log_command) == ("log", "verify")
+
+    help_text = parser.format_help()
+    assert "ca" in help_text
+    for forbidden in ("rotate", "revoke", "reconcile", "--key-type", "--database"):
+        assert forbidden not in help_text
 
 
 def test_serve_uses_production_defaults_and_rejects_invalid_ports() -> None:
