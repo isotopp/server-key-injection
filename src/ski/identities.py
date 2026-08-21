@@ -258,7 +258,6 @@ class SqliteIdentityStore(IdentityStore):
         password_hasher: PasswordHasher | None = None,
         totp_verifier: Callable[..., bool] | None = None,
     ) -> None:
-        self._database = database
         self._repository = SqliteIdentityRepository(database)
         self._password_hasher = (
             PasswordHasher() if password_hasher is None else password_hasher

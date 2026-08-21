@@ -149,6 +149,45 @@ def test_identity_store_exposes_secret_free_user_detail(
         database.close()
 
 
+def test_identity_store_uses_only_the_public_state_unit_of_work(
+    tmp_path: Path,
+) -> None:
+    """Identity authentication and groups work through R1's public boundary."""
+    database = StateDatabase.open(tmp_path / "state.sqlite3", owner=True)
+
+    class PublicStateBoundary:
+        """Expose only the state operations used by the identity repository."""
+
+        def __init__(self, state: StateDatabase) -> None:
+            self._state = state
+
+        @property
+        def schema_version(self) -> int:
+            return self._state.schema_version
+
+        @property
+        def table_names(self) -> frozenset[str]:
+            return self._state.table_names
+
+        def read_connection(self):
+            return self._state.read_connection()
+
+        def transaction(self):
+            return self._state.transaction()
+
+    try:
+        store = SqliteIdentityStore(cast(StateDatabase, PublicStateBoundary(database)))
+        store.create_user("alice", "password", "JBSWY3DPEHPK3PXP")
+        store.create_group("ops")
+        store.add_membership("ops", "alice")
+
+        assert store.lookup_identity("alice") == "alice"
+        assert store.verify_password("alice", "password")
+        assert store.get_group_snapshot("alice").groups == ("ops",)
+    finally:
+        database.close()
+
+
 def test_identity_store_contract_accepts_non_sqlite_implementation() -> None:
     """An authentication-facing boundary can use a store with no SQLite calls."""
 
