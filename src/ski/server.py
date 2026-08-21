@@ -12,6 +12,9 @@ import asyncssh
 from ski.identities import IdentitySnapshot, IdentityStore
 
 TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[str | None]]
+AuthenticatedTracerRequestHandler = Callable[
+    [asyncssh.SSHServerConnection, IdentitySnapshot], Awaitable[str | None]
+]
 ListenerFactory = Callable[..., Awaitable[Any]]
 
 
@@ -21,9 +24,11 @@ class _TracerSession(asyncssh.SSHServerSession):
     def __init__(
         self,
         request_handler: TracerRequestHandler | None,
+        authenticated_request_handler: AuthenticatedTracerRequestHandler | None,
         identity: IdentitySnapshot | None,
     ) -> None:
         self._request_handler = request_handler
+        self._authenticated_request_handler = authenticated_request_handler
         self.identity = identity
         self._channel: asyncssh.SSHServerChannel | None = None
 
@@ -46,14 +51,26 @@ class _TracerSession(asyncssh.SSHServerSession):
             return
 
         result: str | None = None
-        if self._request_handler is not None:
+        connection = cast(
+            asyncssh.SSHServerConnection,
+            self._channel.get_connection(),
+        )
+        if (
+            self.identity is not None
+            and self._authenticated_request_handler is not None
+        ):
             try:
-                result = await self._request_handler(
-                    cast(
-                        asyncssh.SSHServerConnection,
-                        self._channel.get_connection(),
-                    )
+                result = await self._authenticated_request_handler(
+                    connection,
+                    self.identity,
                 )
+            except Exception:  # pragma: no cover - exercised by integration
+                self._channel.write_stderr("Tracer request failed.\n")
+                self._channel.exit(1)
+                return
+        elif self._request_handler is not None:
+            try:
+                result = await self._request_handler(connection)
             except Exception:  # pragma: no cover - exercised by integration
                 self._channel.write_stderr("Tracer request failed.\n")
                 self._channel.exit(1)
@@ -63,6 +80,9 @@ class _TracerSession(asyncssh.SSHServerSession):
             self._channel.write("Tracer request accepted.\n")
         else:
             self._channel.write(f"Key loaded: {result}\n")
+        if self.identity is not None:
+            groups = ", ".join(self.identity.groups) or "(none)"
+            self._channel.write(f"Groups: {groups}\n")
         self._channel.exit(0)
 
 
@@ -72,10 +92,12 @@ class _TracerSSHServer(asyncssh.SSHServer):
     def __init__(
         self,
         request_handler: TracerRequestHandler | None,
+        authenticated_request_handler: AuthenticatedTracerRequestHandler | None,
         identity_store: IdentityStore | None,
         clock: Callable[[], float],
     ) -> None:
         self._request_handler = request_handler
+        self._authenticated_request_handler = authenticated_request_handler
         self._identity_store = identity_store
         self._clock = clock
         self._connection: asyncssh.SSHServerConnection | None = None
@@ -156,7 +178,11 @@ class _TracerSSHServer(asyncssh.SSHServer):
     def session_requested(self) -> _TracerSession | bool:
         if self._identity_store is not None and self._authenticated_identity is None:
             return False
-        return _TracerSession(self._request_handler, self._authenticated_identity)
+        return _TracerSession(
+            self._request_handler,
+            self._authenticated_request_handler,
+            self._authenticated_identity,
+        )
 
 
 class TracerIssuer:
@@ -168,6 +194,7 @@ class TracerIssuer:
         bind: str = "*",
         port: int = 22,
         request_handler: TracerRequestHandler | None = None,
+        authenticated_request_handler: AuthenticatedTracerRequestHandler | None = None,
         listener_factory: ListenerFactory | None = None,
         server_host_key: asyncssh.SSHKey | None = None,
         identity_store: IdentityStore | None = None,
@@ -176,6 +203,7 @@ class TracerIssuer:
         self.bind = bind
         self.requested_port = port
         self.request_handler = request_handler
+        self.authenticated_request_handler = authenticated_request_handler
         self.identity_store = identity_store
         self._clock = clock
         self._server_host_key = (
@@ -214,6 +242,7 @@ class TracerIssuer:
         def server_factory() -> _TracerSSHServer:
             return _TracerSSHServer(
                 self.request_handler,
+                self.authenticated_request_handler,
                 self.identity_store,
                 self._clock,
             )

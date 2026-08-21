@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import signal
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -17,7 +18,7 @@ from ski.configuration import (
     RuntimeConfiguration,
     load_runtime_configuration,
 )
-from ski.identities import SqliteIdentityStore
+from ski.identities import IdentitySnapshot, SqliteIdentityStore
 from ski.injection import TracerAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
 from ski.server import TracerIssuer
@@ -117,6 +118,7 @@ class ServiceRuntime:
                 bind=configuration.bind,
                 port=configuration.port,
                 request_handler=self._handle_tracer_request,
+                authenticated_request_handler=self._handle_authenticated_tracer_request,
                 server_host_key=host_key,
                 identity_store=identity_store,
             )
@@ -295,6 +297,37 @@ class ServiceRuntime:
     ) -> str | None:
         async with self.request_scope():
             return await self._injector.handle(connection)
+
+    async def _handle_authenticated_tracer_request(
+        self,
+        connection: Any,
+        identity: IdentitySnapshot,
+    ) -> str | None:
+        request_id = secrets.token_hex(16)
+        groups = ",".join(identity.groups) or "(none)"
+        fields = {
+            "SKI_REQUEST_ID": request_id,
+            "SKI_IDENTITY": identity.username,
+            "SKI_DECISION": "allow",
+            "SKI_GROUPS": groups,
+        }
+        try:
+            async with self.request_scope():
+                result = await self._injector.handle(connection)
+        except Exception:
+            self._emit(
+                "tracer_request_failed",
+                "tracer request failed",
+                fields={**fields, "SKI_DECISION": "deny"},
+                priority=4,
+            )
+            raise
+        self._emit(
+            "tracer_request_completed",
+            "tracer request completed",
+            fields=fields,
+        )
+        return result
 
     async def _drain_requests(self, grace_period: float) -> None:
         tasks = set(self._in_flight)

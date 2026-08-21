@@ -17,6 +17,8 @@ _ALLOWED_APPLICATION_FIELDS = frozenset(
         "SKI_CONFIG_GENERATION",
         "SKI_DECISION",
         "SKI_ERROR_CODE",
+        "SKI_GROUPS",
+        "SKI_IDENTITY",
         "SKI_PORT",
         "SKI_REASON",
         "SKI_REQUEST_ID",
