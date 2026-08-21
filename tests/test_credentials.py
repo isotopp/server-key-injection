@@ -15,7 +15,7 @@ from ski.credentials import (
     OrdinaryIssuanceService,
 )
 from ski.identities import IdentitySnapshot
-from ski.state import StateDatabase, StateError
+from ski.state import DuplicateCertificateSerialError, StateDatabase, StateError
 from support import runtime_environment
 
 
@@ -111,10 +111,9 @@ def test_ordinary_issuance_commits_certificate_and_event_without_private_key(
             clock=lambda: 1_700_000_000,
             serial_allocator=lambda: 123,
         )
-        credential, record = service.issue(
-            IdentitySnapshot(username="alice", groups=()),
-            request_id="request-ordinary-1",
-        )
+        identity = IdentitySnapshot(username="alice", groups=())
+        credential = service.prepare(identity)
+        record = service.commit(credential, request_id="request-ordinary-1")
         assert record.serial == credential.serial == 123
         assert record.outcome == "success"
         assert [event.kind for event in database.list_events()] == [
@@ -158,7 +157,7 @@ def test_ordinary_factory_denies_unlisted_forwarding_extensions(
         database.close()
 
 
-def test_ordinary_issuance_retries_serial_collision_without_replacing_history(
+def test_ordinary_commit_rejects_serial_collision_without_replacing_history(
     tmp_path: Path,
 ) -> None:
     """A duplicate serial is retried and never overwrites an earlier record."""
@@ -176,20 +175,19 @@ def test_ordinary_issuance_retries_serial_collision_without_replacing_history(
             extensions=("pty",),
             serial_allocator=lambda: 10,
         )
-        first.issue(IdentitySnapshot(username="alice", groups=()), request_id="one")
-        serials = iter((10, 11))
+        identity = IdentitySnapshot(username="alice", groups=())
+        first_credential = first.prepare(identity)
+        first.commit(first_credential, request_id="one")
         second = OrdinaryIssuanceService(
             database,
             active_ca,
             extensions=("pty",),
-            serial_allocator=lambda: next(serials),
+            serial_allocator=lambda: 10,
         )
-        credential, _ = second.issue(
-            IdentitySnapshot(username="alice", groups=()),
-            request_id="two",
-        )
-        assert credential.serial == 11
-        assert [record.serial for record in database.list_certificates()] == [10, 11]
+        second_credential = second.prepare(identity)
+        with pytest.raises(DuplicateCertificateSerialError):
+            second.commit(second_credential, request_id="two")
+        assert [record.serial for record in database.list_certificates()] == [10]
     finally:
         database.close()
 
@@ -228,13 +226,11 @@ def test_ordinary_issuance_does_not_retry_an_untyped_serial_message(
             serial_allocator=lambda: 7,
         )
 
+        identity = IdentitySnapshot(username="alice", groups=())
+        credential = service.prepare(identity)
         with pytest.raises(StateError, match="certificate serial is already recorded"):
-            service.issue(
-                IdentitySnapshot(username="alice", groups=()),
-                request_id="request-untyped-error",
-            )
+            service.commit(credential, request_id="request-untyped-error")
 
         assert persistence.commit_attempts == 1
-        assert persistence.failure_events == 1
     finally:
         database.close()

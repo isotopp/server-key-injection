@@ -308,6 +308,95 @@ def test_persistence_failure_compensates_only_the_new_issuer_credential(
         database.close()
 
 
+def test_agent_workflow_retries_a_typed_serial_collision(
+    tmp_path: Path,
+) -> None:
+    """The forwarded-agent workflow removes a collided key and retries once."""
+    database_path = tmp_path / "state.sqlite3"
+    environment = runtime_environment(tmp_path, database_path)
+    database = StateDatabase.open(database_path)
+    try:
+        active_ca = load_validated_active_ca(
+            database,
+            private_path=Path(environment["SKI_CA_PRIVATE_KEY"]),
+            public_path=Path(environment["SKI_CA_PUBLIC_KEY"]),
+        )
+        identity = IdentitySnapshot("alice", ())
+        first = OrdinaryIssuanceService(
+            database,
+            active_ca,
+            extensions=("pty",),
+            serial_allocator=lambda: 10,
+        )
+        first_credential = first.prepare(identity)
+        first.commit(first_credential, request_id="existing")
+        serials = iter((10, 11))
+        second = OrdinaryIssuanceService(
+            database,
+            active_ca,
+            extensions=("pty",),
+            serial_allocator=lambda: next(serials),
+        )
+        injector = OrdinaryAgentInjector(second)
+
+        async def exercise() -> bytes:
+            async with ssh_agent() as agent_environment:
+
+                async def request_handler(
+                    connection: asyncssh.SSHServerConnection,
+                ) -> str:
+                    await injector.handle(
+                        connection,
+                        identity,
+                        request_id="request-collision",
+                    )
+                    return "ordinary"
+
+                issuer = TracerIssuer(
+                    bind="127.0.0.1",
+                    port=0,
+                    request_handler=request_handler,
+                )
+                await issuer.start()
+                try:
+                    async with asyncssh.connect(
+                        "127.0.0.1",
+                        port=issuer.port,
+                        username="test-user",
+                        known_hosts=None,
+                        agent_path=agent_environment["SSH_AUTH_SOCK"],
+                        agent_forwarding=True,
+                    ) as connection:
+                        process = await connection.create_process(
+                            command=None,
+                            request_pty=False,
+                        )
+                        stdout, stderr = await process.communicate()
+                        assert process.exit_status == 0
+                        assert stdout == "Key loaded: ordinary\n"
+                        assert stderr == ""
+
+                    listing_process = await asyncio.create_subprocess_exec(
+                        "ssh-add",
+                        "-L",
+                        env={**os.environ, **agent_environment},
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    listing, errors = await listing_process.communicate()
+                    assert listing_process.returncode == 0, errors.decode()
+                    return listing
+                finally:
+                    await issuer.close()
+
+        listing = asyncio.run(exercise())
+        assert b":11\n" in listing
+        assert b":10\n" not in listing
+        assert [record.serial for record in database.list_certificates()] == [10, 11]
+    finally:
+        database.close()
+
+
 def test_authenticated_request_without_forwarding_does_not_inject(
     tmp_path: Path,
 ) -> None:

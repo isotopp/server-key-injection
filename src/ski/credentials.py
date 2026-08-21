@@ -19,7 +19,6 @@ from ski.policy import (
 )
 from ski.state import (
     CertificateRecord,
-    DuplicateCertificateSerialError,
     StateDatabase,
     StateError,
 )
@@ -170,26 +169,6 @@ class OrdinaryIssuanceService:
     def active_ca(self) -> ValidatedActiveCA:
         """Return the validated CA used for signing."""
         return self._active_ca
-
-    def issue(
-        self,
-        identity: IdentitySnapshot,
-        *,
-        request_id: str,
-    ) -> tuple[OrdinaryIdentity, CertificateRecord]:
-        """Issue one certificate and atomically record its successful outcome."""
-        for _ in range(5):
-            credential = self.prepare(identity)
-            try:
-                record = self.commit(credential, request_id=request_id)
-            except DuplicateCertificateSerialError:
-                continue
-            except StateError:
-                self.record_failure(identity, request_id)
-                raise
-            return credential, record
-        self.record_failure(identity, request_id)
-        raise StateError("certificate serial allocation failed")
 
     def prepare(self, identity: IdentitySnapshot) -> OrdinaryIdentity:
         """Generate a credential without durable state or agent side effects."""
