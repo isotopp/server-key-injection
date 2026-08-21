@@ -167,6 +167,11 @@ class OrdinaryIssuanceService:
             serial_allocator=serial_allocator,
         )
 
+    @property
+    def active_ca(self) -> ValidatedActiveCA:
+        """Return the validated CA used for signing."""
+        return self._active_ca
+
     def issue(
         self,
         identity: IdentitySnapshot,
@@ -175,28 +180,42 @@ class OrdinaryIssuanceService:
     ) -> tuple[OrdinaryIdentity, CertificateRecord]:
         """Issue one certificate and atomically record its successful outcome."""
         for _ in range(5):
-            credential = self._factory.issue(identity)
+            credential = self.prepare(identity)
             try:
-                record = self._database.record_certificate_with_event(
-                    ca_id=self._active_ca.record.ca_id,
-                    serial=credential.serial,
-                    identity=credential.key_id,
-                    public_key_fingerprint=credential.public_key.get_fingerprint(),
-                    principals=credential.principals,
-                    valid_after=credential.valid_after,
-                    valid_before=credential.valid_before,
-                    request_id=request_id,
-                )
+                record = self.commit(credential, request_id=request_id)
             except StateError as exc:
                 if "serial is already recorded" in str(exc):
                     continue
-                self._record_failure(identity, request_id)
+                self.record_failure(identity, request_id)
                 raise
             return credential, record
-        self._record_failure(identity, request_id)
+        self.record_failure(identity, request_id)
         raise StateError("certificate serial allocation failed")
 
-    def _record_failure(self, identity: IdentitySnapshot, request_id: str) -> None:
+    def prepare(self, identity: IdentitySnapshot) -> OrdinaryIdentity:
+        """Generate a credential without durable state or agent side effects."""
+        return self._factory.issue(identity)
+
+    def commit(
+        self,
+        credential: OrdinaryIdentity,
+        *,
+        request_id: str,
+    ) -> CertificateRecord:
+        """Persist one prepared credential and its successful event atomically."""
+        return self._database.record_certificate_with_event(
+            ca_id=self._active_ca.record.ca_id,
+            serial=credential.serial,
+            identity=credential.key_id,
+            public_key_fingerprint=credential.public_key.get_fingerprint(),
+            principals=credential.principals,
+            valid_after=credential.valid_after,
+            valid_before=credential.valid_before,
+            request_id=request_id,
+        )
+
+    def record_failure(self, identity: IdentitySnapshot, request_id: str) -> None:
+        """Append a safe failed-operation event when durable state permits it."""
         try:
             self._database.record_event(
                 kind="certificate_failed",

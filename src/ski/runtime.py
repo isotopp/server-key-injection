@@ -19,8 +19,9 @@ from ski.configuration import (
     RuntimeConfiguration,
     load_runtime_configuration,
 )
+from ski.credentials import OrdinaryIssuanceService
 from ski.identities import IdentitySnapshot, SqliteIdentityStore
-from ski.injection import TracerAgentInjector
+from ski.injection import OrdinaryAgentInjector, TracerAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
 from ski.server import TracerIssuer
 from ski.state import StateDatabase
@@ -72,6 +73,7 @@ class ServiceRuntime:
         self._reload_requested = asyncio.Event()
         self._reload_lock = asyncio.Lock()
         self._injector = TracerAgentInjector()
+        self._ordinary_injector: OrdinaryAgentInjector | None = None
 
     @property
     def configuration(self) -> RuntimeConfiguration:
@@ -133,6 +135,13 @@ class ServiceRuntime:
                 public_path=configuration.ca_public_key,
             )
             self._active_ca = active_ca
+            self._ordinary_injector = OrdinaryAgentInjector(
+                OrdinaryIssuanceService(
+                    state,
+                    active_ca,
+                    extensions=configuration.ordinary_extensions,
+                ),
+            )
             identity_store = SqliteIdentityStore(state)
             issuer = self._issuer_factory(
                 bind=configuration.bind,
@@ -245,6 +254,7 @@ class ServiceRuntime:
                 state.close()
             self._configuration = None
             self._active_ca = None
+            self._ordinary_injector = None
             self._configuration_generation = 0
             self._emit("service_stopped", "ski shutdown complete")
             self._close_complete.set()
@@ -341,18 +351,33 @@ class ServiceRuntime:
         }
         try:
             async with self.request_scope():
-                result = await self._injector.handle(connection)
-        except Exception:
+                if self._ordinary_injector is None:
+                    raise RuntimeError("ordinary injector is unavailable")
+                issuance = await self._ordinary_injector.handle(
+                    connection,
+                    identity,
+                    request_id=request_id,
+                )
+                fields["SKI_CERTIFICATE_SERIAL"] = str(issuance.record.serial)
+                result = (
+                    f"{identity.username} serial={issuance.record.serial} "
+                    f"valid-until={issuance.record.valid_before}"
+                )
+        except Exception as exc:
             self._emit(
-                "tracer_request_failed",
-                "tracer request failed",
-                fields={**fields, "SKI_DECISION": "deny"},
+                "certificate_request_failed",
+                "certificate request failed",
+                fields={
+                    **fields,
+                    "SKI_DECISION": "deny",
+                    "SKI_ERROR_CODE": type(exc).__name__,
+                },
                 priority=4,
             )
             raise
         self._emit(
-            "tracer_request_completed",
-            "tracer request completed",
+            "certificate_request_completed",
+            "certificate request completed",
             fields=fields,
         )
         return result
@@ -373,6 +398,7 @@ class ServiceRuntime:
         issuer, self._issuer = self._issuer, None
         state, self._state = self._state, None
         self._active_ca = None
+        self._ordinary_injector = None
         if issuer is not None:
             await issuer.close()
         if state is not None:

@@ -137,6 +137,85 @@ def test_authenticated_forwarded_request_injects_dummy_identity_and_groups(
         database.close()
 
 
+def test_ordinary_renewal_preserves_an_unrelated_agent_identity(
+    tmp_path: Path,
+) -> None:
+    """Renewal removes only the current user's ski credential."""
+    database_path = tmp_path / "state.sqlite3"
+    database = StateDatabase.open(database_path)
+    try:
+        user = SqliteIdentityStore(database).create_user(
+            "alice",
+            "password",
+            "JBSWY3DPEHPK3PXP",
+        )
+    finally:
+        database.close()
+
+    async def exercise() -> bytes:
+        agent_environment = await _start_test_agent()
+        unrelated_key_path = tmp_path / "unrelated"
+        unrelated_key = asyncssh.generate_private_key(
+            "ssh-ed25519", comment="unrelated"
+        )
+        unrelated_key_path.write_bytes(unrelated_key.export_private_key())
+        unrelated_key_path.chmod(0o600)
+        add_process = await asyncio.create_subprocess_exec(
+            "ssh-add",
+            str(unrelated_key_path),
+            env={**os.environ, **agent_environment},
+        )
+        await add_process.wait()
+        assert add_process.returncode == 0
+        try:
+            runtime = ServiceRuntime(
+                bind="127.0.0.1",
+                port=0,
+                exported_environment=runtime_environment(tmp_path, database_path),
+                event_sink=MemoryEventSink(),
+            )
+            await runtime.start()
+            try:
+                for _ in range(2):
+                    async with asyncssh.connect(
+                        "127.0.0.1",
+                        port=runtime.issuer.port,
+                        username="alice",
+                        known_hosts=None,
+                        agent_path=agent_environment["SSH_AUTH_SOCK"],
+                        agent_forwarding=True,
+                        client_factory=lambda: _MfaClient(
+                            "password",
+                            pyotp.TOTP(user.totp_secret).now(),
+                        ),
+                        kbdint_auth=True,
+                    ) as connection:
+                        process = await connection.create_process(
+                            command=None,
+                            request_pty=False,
+                        )
+                        stdout, stderr = await process.communicate()
+                        assert process.exit_status == 0, stderr
+                listed = await asyncio.create_subprocess_exec(
+                    "ssh-add",
+                    "-L",
+                    env={**os.environ, **agent_environment},
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                listing, errors = await listed.communicate()
+                assert listed.returncode == 0, errors.decode()
+                return listing
+            finally:
+                await runtime.close()
+        finally:
+            await _stop_test_agent(agent_environment)
+
+    listing = asyncio.run(exercise())
+    assert b"unrelated" in listing
+    assert b"ski:alice:" in listing
+
+
 def test_authenticated_request_without_forwarding_does_not_inject(
     tmp_path: Path,
 ) -> None:
@@ -259,10 +338,10 @@ def test_group_snapshot_failure_denies_before_agent_injection(tmp_path: Path) ->
         database.close()
 
 
-def test_runtime_restart_keeps_host_key_but_rotates_disposable_user_ca(
+def test_runtime_restart_keeps_host_key_but_rotates_ordinary_user_credentials(
     tmp_path: Path,
 ) -> None:
-    """A database keeps its host key while each runtime gets a fresh dummy CA."""
+    """A database keeps its host key while each runtime gets a fresh user key."""
     database_path = tmp_path / "state.sqlite3"
     database = StateDatabase.open(database_path)
     try:
@@ -305,8 +384,8 @@ def test_runtime_restart_keeps_host_key_but_rotates_disposable_user_ca(
                             request_pty=False,
                         )
                         stdout, stderr = await process.communicate()
-                        assert process.exit_status == 0
-                        assert stdout.startswith("Key loaded: test-")
+                        assert process.exit_status == 0, stderr
+                        assert stdout.startswith("Key loaded: alice ")
                         assert stderr == ""
                         host_key = connection.get_server_host_key()
                         assert host_key is not None
@@ -324,7 +403,11 @@ def test_runtime_restart_keeps_host_key_but_rotates_disposable_user_ca(
                     observations.append(
                         (
                             fingerprint,
-                            {line for line in listing.splitlines() if b"test-" in line},
+                            {
+                                line
+                                for line in listing.splitlines()
+                                if b"ski:alice:" in line
+                            },
                         ),
                     )
                 finally:
@@ -342,7 +425,8 @@ def test_runtime_restart_keeps_host_key_but_rotates_disposable_user_ca(
         first_host, first_keys, second_host, second_keys = asyncio.run(exercise())
         assert first_host == second_host
         assert first_keys
-        assert second_keys - first_keys
+        assert second_keys
+        assert second_keys != first_keys
     finally:
         database.close()
 
@@ -391,7 +475,7 @@ def test_authenticated_completion_event_is_redacted_and_group_aware(
                 )
                 stdout, stderr = await process.communicate()
                 assert process.exit_status == 0
-                assert stdout.startswith("Key loaded: test-")
+                assert stdout.startswith("Key loaded: alice ")
                 assert stderr == ""
         finally:
             await runtime.close()
@@ -401,13 +485,14 @@ def test_authenticated_completion_event_is_redacted_and_group_aware(
     try:
         events = asyncio.run(exercise())
         completion = next(
-            event for event in events if event.name == "tracer_request_completed"
+            event for event in events if event.name == "certificate_request_completed"
         )
         assert set(completion.fields) == {
             "SKI_REQUEST_ID",
             "SKI_IDENTITY",
             "SKI_DECISION",
             "SKI_GROUPS",
+            "SKI_CERTIFICATE_SERIAL",
         }
         assert completion.fields["SKI_IDENTITY"] == "alice"
         assert completion.fields["SKI_DECISION"] == "allow"
@@ -463,7 +548,7 @@ def test_injection_failure_response_and_event_are_redacted(tmp_path: Path) -> No
                 stdout, stderr = await process.communicate()
                 assert process.exit_status == 1
                 assert stdout == ""
-                assert stderr == "Tracer request failed.\n"
+                assert stderr == "Certificate request failed.\n"
         finally:
             await runtime.close()
         return list(sink.events)
@@ -471,17 +556,24 @@ def test_injection_failure_response_and_event_are_redacted(tmp_path: Path) -> No
     try:
         events = asyncio.run(exercise())
         failure = next(
-            event for event in events if event.name == "tracer_request_failed"
+            event for event in events if event.name == "certificate_request_failed"
         )
         assert set(failure.fields) == {
             "SKI_REQUEST_ID",
             "SKI_IDENTITY",
             "SKI_DECISION",
             "SKI_GROUPS",
+            "SKI_ERROR_CODE",
         }
         assert failure.fields["SKI_DECISION"] == "deny"
         rendered = repr(events)
         assert "-----BEGIN" not in rendered
         assert "agent" not in rendered.lower()
+        database = StateDatabase.open(database_path, owner=True)
+        try:
+            assert database.list_certificates() == ()
+            assert database.list_events()[-1].kind == "certificate_failed"
+        finally:
+            database.close()
     finally:
         database.close()

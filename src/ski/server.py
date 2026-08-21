@@ -66,7 +66,7 @@ class _TracerSession(asyncssh.SSHServerSession):
                     self.identity,
                 )
             except Exception:  # pragma: no cover - exercised by integration
-                self._channel.write_stderr("Tracer request failed.\n")
+                self._channel.write_stderr("Certificate request failed.\n")
                 self._channel.exit(1)
                 return
         elif self._request_handler is not None:
