@@ -7,11 +7,15 @@ import os
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import asyncssh
 
 from ski.ca import CAFileWriter
+from ski.identities import SqliteIdentityStore, UserRecord
+from ski.journal import MemoryEventSink
+from ski.runtime import ServiceRuntime
 from ski.state import StateDatabase
 
 
@@ -38,6 +42,52 @@ class MfaClient(asyncssh.SSHClient):
 def mfa_client_factory(password: str, code: str) -> Callable[[], MfaClient]:
     """Return an AsyncSSH client factory answering the two MFA prompts."""
     return lambda: MfaClient(password, code)
+
+
+@dataclass(frozen=True, slots=True)
+class EnrolledRuntime:
+    """Resources owned by one enrolled issuer integration scenario."""
+
+    runtime: ServiceRuntime
+    user: UserRecord
+    database: Path
+    agent_environment: dict[str, str]
+
+
+@asynccontextmanager
+async def enrolled_runtime(
+    tmp_path: Path,
+    *,
+    username: str = "alice",
+    password: str = "password",
+    totp_secret: str = "JBSWY3DPEHPK3PXP",
+    groups: Sequence[str] = (),
+) -> AsyncIterator[EnrolledRuntime]:
+    """Run a configured issuer with one enrolled demo user and agent."""
+    database = tmp_path / "state.sqlite3"
+    state = StateDatabase.open(database)
+    try:
+        store = SqliteIdentityStore(state)
+        user = store.create_user(username, password, totp_secret)
+        for group in groups:
+            store.create_group(group)
+            store.add_membership(group, username)
+        user = store.get_user(username)
+    finally:
+        state.close()
+
+    runtime = ServiceRuntime(
+        bind="127.0.0.1",
+        port=0,
+        exported_environment=runtime_environment(tmp_path, database),
+        event_sink=MemoryEventSink(),
+    )
+    await runtime.start()
+    try:
+        async with ssh_agent() as agent_environment:
+            yield EnrolledRuntime(runtime, user, database, agent_environment)
+    finally:
+        await runtime.close()
 
 
 @asynccontextmanager
