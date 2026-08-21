@@ -17,6 +17,7 @@ from ski.configuration import (
     RuntimeConfiguration,
     load_runtime_configuration,
 )
+from ski.identities import SqliteIdentityStore
 from ski.injection import TracerAgentInjector
 from ski.journal import ConsoleEventSink, Event, JournalEventSink, MemoryEventSink
 from ski.server import TracerIssuer
@@ -111,11 +112,13 @@ class ServiceRuntime:
             state = self._state_opener(configuration.database, owner=True)
             self._state = state
             host_key = asyncssh.import_private_key(state.host_key.private_key)
+            identity_store = SqliteIdentityStore(state)
             issuer = self._issuer_factory(
                 bind=configuration.bind,
                 port=configuration.port,
                 request_handler=self._handle_tracer_request,
                 server_host_key=host_key,
+                identity_store=identity_store,
             )
             self._issuer = issuer
             await issuer.start()

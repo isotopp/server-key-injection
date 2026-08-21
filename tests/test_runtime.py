@@ -4,15 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
 import asyncssh
+import pyotp
 import pytest
 
+from ski.identities import SqliteIdentityStore
 from ski.journal import MemoryEventSink
 from ski.runtime import IssuerFactory, ServiceRuntime, StateOpener
 from ski.state import StateDatabase, StateError
+
+
+class _RuntimeMfaClient(asyncssh.SSHClient):
+    def __init__(self, password: str, code: str) -> None:
+        self.password = password
+        self.code = code
+
+    def kbdint_auth_requested(self) -> str:
+        return ""
+
+    def kbdint_challenge_received(
+        self,
+        name: str,
+        instructions: str,
+        lang: str,
+        prompts: Sequence[tuple[str, bool]],
+    ) -> list[str]:
+        return [self.password, self.code]
 
 
 def test_service_runtime_starts_state_and_listener_before_ready_event(
@@ -44,6 +65,15 @@ def test_service_runtime_starts_state_and_listener_before_ready_event(
 def test_runtime_reuses_the_database_host_key_after_restart(tmp_path: Path) -> None:
     """The real SSH listener presents the database-owned host key."""
     database_path = tmp_path / "state.sqlite3"
+    database = StateDatabase.open(database_path)
+    try:
+        SqliteIdentityStore(database).create_user(
+            "alice",
+            "password",
+            "JBSWY3DPEHPK3PXP",
+        )
+    finally:
+        database.close()
 
     async def fingerprint() -> str:
         runtime = ServiceRuntime(
@@ -57,8 +87,13 @@ def test_runtime_reuses_the_database_host_key_after_restart(tmp_path: Path) -> N
             async with asyncssh.connect(
                 "127.0.0.1",
                 port=runtime.issuer.port,
-                username="test-user",
+                username="alice",
                 known_hosts=None,
+                client_factory=lambda: _RuntimeMfaClient(
+                    "password",
+                    pyotp.TOTP("JBSWY3DPEHPK3PXP").now(),
+                ),
+                kbdint_auth=True,
             ) as connection:
                 server_host_key = connection.get_server_host_key()
                 assert server_host_key is not None

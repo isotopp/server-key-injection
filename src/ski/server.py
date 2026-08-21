@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, cast
 
 import asyncssh
+
+from ski.identities import IdentitySnapshot, IdentityStore
 
 TracerRequestHandler = Callable[[asyncssh.SSHServerConnection], Awaitable[str | None]]
 ListenerFactory = Callable[..., Awaitable[Any]]
@@ -15,8 +18,13 @@ ListenerFactory = Callable[..., Awaitable[Any]]
 class _TracerSession(asyncssh.SSHServerSession):
     """Handle the one interactive session exposed by the tracer."""
 
-    def __init__(self, request_handler: TracerRequestHandler | None) -> None:
+    def __init__(
+        self,
+        request_handler: TracerRequestHandler | None,
+        identity: IdentitySnapshot | None,
+    ) -> None:
         self._request_handler = request_handler
+        self.identity = identity
         self._channel: asyncssh.SSHServerChannel | None = None
 
     def connection_made(self, chan: asyncssh.SSHServerChannel) -> None:
@@ -59,18 +67,96 @@ class _TracerSession(asyncssh.SSHServerSession):
 
 
 class _TracerSSHServer(asyncssh.SSHServer):
-    """Permit the unauthenticated SSH handshake used by the tracer."""
+    """Handle anonymous tracer handshakes or one MFA identity exchange."""
 
-    def __init__(self, request_handler: TracerRequestHandler | None) -> None:
+    def __init__(
+        self,
+        request_handler: TracerRequestHandler | None,
+        identity_store: IdentityStore | None,
+        clock: Callable[[], float],
+    ) -> None:
         self._request_handler = request_handler
+        self._identity_store = identity_store
+        self._clock = clock
+        self._connection: asyncssh.SSHServerConnection | None = None
+        self._username: str | None = None
+        self._exchange_attempted = False
+        self._authenticated_identity: IdentitySnapshot | None = None
+
+    def connection_made(self, conn: asyncssh.SSHServerConnection) -> None:
+        """Retain the connection only to terminate a failed MFA exchange."""
+        self._connection = conn
 
     def begin_auth(self, username: str) -> bool:
-        """Skip authentication; the tracer has no identity store yet."""
-        del username
-        return False
+        """Require one keyboard-interactive exchange when identities are enabled."""
+        self._username = username
+        return self._identity_store is not None
 
-    def session_requested(self) -> _TracerSession:
-        return _TracerSession(self._request_handler)
+    def kbdint_auth_supported(self) -> bool:
+        """Advertise keyboard-interactive auth only for identity-backed tracers."""
+        return self._identity_store is not None
+
+    def get_kbdint_challenge(
+        self,
+        username: str,
+        lang: str,
+        submethods: str,
+    ) -> tuple[str, str, str, tuple[tuple[str, bool], ...]] | bool:
+        """Issue exactly one combined password and TOTP challenge."""
+        del lang, submethods
+        if (
+            self._identity_store is None
+            or self._exchange_attempted
+            or self._username != username
+        ):
+            return False
+        self._exchange_attempted = True
+        return (
+            "ski",
+            "Authenticate with your ski password and TOTP code.",
+            "",
+            (("Password:", False), ("2FA:", False)),
+        )
+
+    def validate_kbdint_response(
+        self,
+        username: str,
+        responses: Sequence[str],
+    ) -> bool:
+        """Verify both factors and bind a current group snapshot on success."""
+        if self._identity_store is None or not self._exchange_attempted:
+            return False
+        if self._username != username or len(responses) != 2:
+            if self._connection is not None:
+                self._connection.abort()
+            return False
+        try:
+            password_ok = self._identity_store.verify_password(
+                username,
+                responses[0],
+            )
+            totp_ok = self._identity_store.verify_totp(
+                username,
+                responses[1],
+                now=int(self._clock()),
+            )
+            if not password_ok or not totp_ok:
+                if self._connection is not None:
+                    self._connection.abort()
+                return False
+            self._authenticated_identity = self._identity_store.get_group_snapshot(
+                username,
+            )
+            return True
+        except Exception:
+            if self._connection is not None:
+                self._connection.abort()
+            return False
+
+    def session_requested(self) -> _TracerSession | bool:
+        if self._identity_store is not None and self._authenticated_identity is None:
+            return False
+        return _TracerSession(self._request_handler, self._authenticated_identity)
 
 
 class TracerIssuer:
@@ -84,10 +170,14 @@ class TracerIssuer:
         request_handler: TracerRequestHandler | None = None,
         listener_factory: ListenerFactory | None = None,
         server_host_key: asyncssh.SSHKey | None = None,
+        identity_store: IdentityStore | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.bind = bind
         self.requested_port = port
         self.request_handler = request_handler
+        self.identity_store = identity_store
+        self._clock = clock
         self._server_host_key = (
             asyncssh.generate_private_key("ssh-ed25519")
             if server_host_key is None
@@ -122,7 +212,11 @@ class TracerIssuer:
         hosts = ("0.0.0.0", "::") if self.bind == "*" else (self.bind,)
 
         def server_factory() -> _TracerSSHServer:
-            return _TracerSSHServer(self.request_handler)
+            return _TracerSSHServer(
+                self.request_handler,
+                self.identity_store,
+                self._clock,
+            )
 
         opened: list[Any] = []
         port = self.requested_port
