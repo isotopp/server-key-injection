@@ -39,7 +39,12 @@ def test_host_wheel_has_no_issuer_package_or_runtime_dependencies(
         metadata = archive.read(metadata_name).decode("utf-8")
 
     assert all(not name.startswith("ski/") for name in names)
-    assert "Requires-Dist:" not in metadata
+    requirements = [
+        line.removeprefix("Requires-Dist: ")
+        for line in metadata.splitlines()
+        if line.startswith("Requires-Dist:")
+    ]
+    assert requirements == ["asyncssh>=2.21.1"]
 
 
 def test_host_version_command_has_no_stateful_side_effect(tmp_path: Path) -> None:

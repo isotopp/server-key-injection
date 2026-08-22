@@ -365,6 +365,9 @@ dev = [
 name = "ski-authorize"
 version = "0.1.0"
 source = { editable = "packages/ski-authorize" }
+dependencies = [
+    { name = "asyncssh" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -374,6 +377,7 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "asyncssh", specifier = ">=2.21.1" }]
 
 [package.metadata.requires-dev]
 dev = [
