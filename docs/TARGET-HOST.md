@@ -161,6 +161,11 @@ guest's OpenSSH version is 9 or later. The guest receives only the
 OpenSSH fragment. Do not copy the issuer SQLite file, dotenv file, CA private
 key, or any issuer credential into the guest.
 
+**Recorded result (2026-08-22): passed.** The manual successful-path test
+accepted an Ed25519 user certificate signed by the configured user CA and
+opened a session for the existing local account. The OpenSSH journal recorded
+the certificate serial and trusted CA fingerprint.
+
 1. Install the package with `sudo ./install.sh`, install the public key and
    policy under the exact `/opt/ski-authorize/config/` paths, install the
    fragment under `/etc/ssh/sshd_config.d/60-ski-authorize.conf`, and confirm
