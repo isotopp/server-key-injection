@@ -19,3 +19,13 @@ host helper. It does not contact the issuer or identity store during login.
 KRL and CA-rotation instructions are added only when the corresponding Epic 6
 commands and behavior are implemented. Until then, the guides label those
 operations as pending rather than presenting speculative commands.
+
+## Final handoff check
+
+Before adopting the proof of concept, follow the links above and compare every
+command example with the installed revision's `ski --help`, `ski ca --help`,
+and `ski-authorize --help`. Confirm that the target host's public CA, local
+policy, file ownership, OpenSSH version, and SELinux posture have been reviewed
+by the installing organization. The documentation is evidence of the intended
+boundary; it does not replace that organization's identity integration,
+configuration management, monitoring, incident response, or production review.
