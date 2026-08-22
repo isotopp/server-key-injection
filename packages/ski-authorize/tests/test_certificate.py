@@ -94,6 +94,29 @@ def test_host_certificate_is_rejected() -> None:
         )
 
 
+def test_certificate_signed_by_unsupported_ca_algorithm_is_rejected() -> None:
+    """The host helper accepts only certificates signed by an Ed25519 CA."""
+    ca_key = asyncssh.generate_private_key("ssh-rsa")
+    user_key = asyncssh.generate_private_key("ssh-ed25519")
+    certificate = ca_key.generate_user_certificate(
+        user_key,
+        "alice",
+        principals=("alice", "group:platform-ops"),
+        valid_after=1_700_000_000,
+        valid_before=1_700_100_000,
+    )
+    certificate_type, certificate_base64 = (
+        certificate.export_certificate().decode("ascii").split()
+    )
+
+    with pytest.raises(ValueError):
+        parse_certificate(
+            certificate_type,
+            certificate_base64,
+            clock=lambda: 1_700_050_000,
+        )
+
+
 def test_expired_and_not_yet_valid_certificates_are_rejected() -> None:
     """Certificate validity is checked using the injected current time."""
     ca_key = asyncssh.generate_private_key("ssh-ed25519")

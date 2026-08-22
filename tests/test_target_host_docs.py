@@ -39,3 +39,22 @@ def test_target_host_guide_links_from_operation_documentation() -> None:
     """Operators can find host deployment guidance from routine operations docs."""
     operation = (ROOT / "docs/OPERATION.md").read_text()
     assert "[`TARGET-HOST.md`](TARGET-HOST.md)" in operation
+
+
+def test_target_host_guide_contains_manual_rocky_utm_acceptance_procedure() -> None:
+    """The production-style check remains explicit and manual."""
+    guide = GUIDE.read_text()
+    for required in (
+        "Rocky Linux 9.x UTM smoke checklist (Epic 5, manual)",
+        "OpenSSH version is 9 or later",
+        "pre-existing local account",
+        "sudo sshd -t",
+        "getenforce",
+        "ski serve",
+        "corporate office issuer network",
+        "ordinary un-certified Ed25519 key",
+        "wrong target account",
+        "only a group not listed by the host policy",
+        "Do not automate UTM",
+    ):
+        assert required in guide

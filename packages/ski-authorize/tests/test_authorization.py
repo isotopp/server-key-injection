@@ -73,6 +73,15 @@ def _certificate(*, principals: tuple[str, ...] | None = None) -> CertificateAtt
             "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             "alice",
         ),
+        (
+            _policy("group:platform-ops"),
+            replace(
+                _certificate(),
+                ca_fingerprint="SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            ),
+            FINGERPRINT,
+            "alice",
+        ),
         (_policy("group:platform-ops"), _certificate(), FINGERPRINT, "bob"),
         (
             _policy("group:platform-ops"),

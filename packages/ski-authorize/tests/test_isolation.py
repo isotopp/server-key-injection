@@ -73,3 +73,23 @@ def test_host_version_command_has_no_stateful_side_effect(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ski-authorize 0.1.0\n"
     assert not list(tmp_path.rglob("*.sqlite3"))
+
+
+def test_host_source_has_no_issuer_or_remote_runtime_boundary() -> None:
+    """The helper source contains no issuer endpoint, state, or listener path."""
+    source = "\n".join(
+        path.read_text()
+        for path in sorted((PACKAGE / "src/ski_authorize").rglob("*.py"))
+    )
+    for forbidden in (
+        "python-dotenv",
+        "sqlite3",
+        "SKI_CA_DATABASE",
+        "ssh.example.com",
+        "asyncssh.connect",
+        "socket.socket",
+        "uvicorn",
+        "telemetry",
+        "config-management",
+    ):
+        assert forbidden not in source

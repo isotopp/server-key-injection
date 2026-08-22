@@ -152,7 +152,51 @@ getenforce
 sudo ausearch -m AVC -ts recent
 ```
 
-The manual acceptance procedure, including accepted and denied login cases,
-is in the final section of this guide's Epic 5 smoke checklist and must be
-performed without starting an issuer process or adding an office-network
-route.
+## Rocky Linux 9.x UTM smoke checklist (Epic 5, manual)
+
+This is a repeatable operator check, not an automated test or a VM
+provisioner. Take a disposable Rocky Linux 9.x UTM snapshot and verify the
+guest's OpenSSH version is 9 or later. The guest receives only the
+`ski-authorize` host artifact, `user-ca.pub`, the reviewed policy, and the
+OpenSSH fragment. Do not copy the issuer SQLite file, dotenv file, CA private
+key, or any issuer credential into the guest.
+
+1. Install the package with `sudo ./install.sh`, install the public key and
+   policy under the exact `/opt/ski-authorize/config/` paths, install the
+   fragment under `/etc/ssh/sshd_config.d/60-ski-authorize.conf`, and confirm
+   with `namei -l` and `find -L /opt/ski-authorize -type l` that the tree is
+   root-owned and contains no symlinks.
+2. Create or select a pre-existing local account, for example
+   `sudo useradd --create-home --shell /bin/bash test-user`. This account is
+   created by the host operator, never by the helper. Set the policy to allow
+   the signed `group:platform-ops` principal and verify the CA fingerprint
+   against `ski ca show` before shipping the public key.
+3. Run `sudo sshd -t`, check `getenforce` is `Enforcing`, and reload with
+   `sudo systemctl reload sshd`. Record `ssh -V`, `sudo sshd -T`, and the
+   ownership/mode checks as non-secret evidence.
+4. From a client on the office side, obtain a current certificate for
+   `test-user` from the issuer. Keep the private key and agent on that client;
+   only the certificate's public material crosses the firewall as part of the
+   SSH authentication. With the certificate loaded in the client agent, run
+   `ssh -o IdentitiesOnly=no test-user@ROCKY_UTM_ADDRESS` and confirm that the
+   login succeeds and the target account is `test-user`.
+5. Confirm the helper's fail-closed cases. Each attempt must be rejected with
+   no shell: use the same certificate as `test-other` (wrong target account),
+   use a certificate carrying only a group not listed by the host policy,
+   temporarily replace the policy fingerprint with another valid fingerprint,
+   and try an ordinary un-certified Ed25519 key. After each policy edit run
+   `sshd -t` and reload; restore the reviewed policy and reload it again.
+6. Verify the offline boundary while testing: no `ski serve` process is
+   running in the guest, no issuer SQLite or dotenv state exists below
+   `/opt/ski-authorize`, and the guest routing/firewall policy has no route to
+   the corporate office issuer network. The helper must still authorize or
+   deny using only its local files and the certificate offered by OpenSSH.
+7. If SELinux reports an AVC, capture the audit record with
+   `sudo ausearch -m AVC -ts recent` and correct the labelled, root-owned
+   installation or policy. Do not disable SELinux or broaden the helper's
+   permissions as a workaround. Remove temporary accounts and credentials
+   after the snapshot test.
+
+This checklist intentionally does not test Debian or Ubuntu, distribute a
+KRL, or rotate a CA. Do not automate UTM: those activities are outside Epic 5;
+the next security review is scheduled after Epic 6.
