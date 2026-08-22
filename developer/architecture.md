@@ -22,8 +22,8 @@ enforces the host's configured group policy at login time.
 
 The issuer creates an ephemeral keypair, signs an OpenSSH user certificate,
 and adds the key and certificate to the user's existing agent through an SSH
-agent-forwarding channel. It obtains user principals (including directory
-groups) and supports separate regular, temporary, and emergency flows.
+agent-forwarding channel. The implemented proof of concept obtains canonical
+users and groups from its SQLite demo identity store.
 
 Production hosts trust the CA through `TrustedUserCAKeys` and run an
 `AuthorizedPrincipalsCommand`. That command receives the target login user and
@@ -179,7 +179,7 @@ history.
 ```mermaid
 flowchart TB
     U["User workstation\nssh-agent"] -->|"SSH with agent forwarding\ninteractive authentication"| I["ssh.example.com\nPython issuer"]
-    D["IdentityStore\ndemo: SQLite\nproduction: identity provider"] -->|"authentication and group lookup"| I
+    D["IdentityStore\ndemo: SQLite\nexternal deployment adapter"] -->|"authentication and group lookup"| I
     I -->|"generate ephemeral keypair, sign\nuser certificate, add via agent channel"| U
     U -->|"certificate-backed SSH login"| S["Production OpenSSH server"]
     C["CA public key + local host policy\nallowed groups + KRL"] --> S
@@ -274,14 +274,16 @@ administration. The stable issuer-facing capability consists of:
   certificate work begins.
 
 `IssuerIdentityProvider` combines these three read-only capabilities for the
-SSH adapter. A production LDAP, Active Directory, or custom provider normally
-implements only this combined contract and owns its own credentials, group
-authority, transport, caching, and availability policy. It is not required to
-implement `UserAdministration` or `GroupAdministration`; those optional
-protocols are implemented only by the standalone `SqliteIdentityStore` demo
-adapter for the local `ski user` and `ski group` mutation commands. Read-only
-adapters must not expose password verifiers or TOTP secrets, and the issuer
-must fail closed for malformed, ambiguous, or unavailable responses.
+SSH adapter. The project does not implement a production LDAP, Active
+Directory, Okta, or custom provider: an installing organization which adopts
+this proof of concept must provide and secure its own adapter, including its
+credentials, group authority, transport, caching, and availability policy. It
+is not required to implement `UserAdministration` or `GroupAdministration`;
+those optional protocols are implemented only by the standalone
+`SqliteIdentityStore` demo adapter for the local `ski user` and `ski group`
+mutation commands. Read-only adapters must not expose password verifiers or
+TOTP secrets, and the issuer must fail closed for malformed, ambiguous, or
+unavailable responses.
 
 Production hosts do not receive a copy of the issuer's SQLite database and
 never query `IdentityStore` at login. The certificate contains the signed group
@@ -676,20 +678,19 @@ without it retains the configured certificate-lifetime behaviour. Rotation
 follows public-key deployment overlap. This epic does not require configuration
 management to distribute the KRL.
 
-### Epic 7 — Production identity and controlled access variants
+### Epic 7 — Cancelled: production identity integration
 
-**Goal.** Replace demo identity lookup without changing the issuance or
-offline-host authorization contracts, then introduce explicitly scoped access
-variants.
+**Decision.** This project stops at the SQLite-backed proof of concept. It
+does not implement a production identity backend or controlled-access variants.
 
-**Includes.** A production `IdentityStore` adapter, identity/group lookup
-failure semantics, ordinary account mapping, and separately designed temporary,
-emergency, service-account, or root access paths.
-
-**Exit boundary.** The production adapter is issuer-side only. Every
-non-ordinary access variant has its own eligibility, principal scope, validity,
-critical options, audit requirements, and test coverage. It must not broaden
-ordinary certificate access by default.
+**Installer-owned follow-on.** An organization adopting this design must build
+and review its own issuer-side `IdentityStore` adapter for LDAP, Active
+Directory, Okta, or another authority. That organization owns its identity
+credentials, directory/group semantics, transport, caching, availability and
+failure policy, ordinary-account mapping, and any temporary, emergency,
+service-account, or root-access design. Such work must preserve the existing
+issuance and offline-host authorization contracts and must not broaden ordinary
+certificate access by default.
 
 ### Epic 8 — Operational assurance and security regression suite
 
