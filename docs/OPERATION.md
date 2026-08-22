@@ -145,6 +145,17 @@ It then closes the session. The generated private key and matching signed
 certificate are held in the forwarded agent, not written to the user's home
 directory. `ssh-add -l` displays the corresponding `ED25519` and
 `ED25519-CERT` entries; together they form one usable certificate credential.
+The `ED25519` entry is the ephemeral private key and the `ED25519-CERT` entry
+is its matching signed public certificate; they are not two independent
+credentials. The issuer's ownership marker and certificate serial distinguish
+this pair from identities the user already had in the agent.
+
+To renew, repeat the issuer login before the current certificate expires and
+confirm the new validity and serial with `ssh-add -l`. There is no client
+daemon or automatic renewal workflow in this proof of concept. Do not copy the
+private key or certificate into `~/.ssh`, and do not run `ssh-add -D` against an
+agent which contains identities you do not intend to remove.
+
 The certificate expires exactly 25 hours after issuance, so users normally
 repeat the issuer login once per day. A group membership change affects newly
 issued certificates; it does not rewrite a credential already held by an
@@ -155,6 +166,13 @@ must reject the request with `Agent forwarding is required.` If authentication
 fails, no new credential should appear in the agent. Production hosts accept
 these certificates only when separately configured with the trusted CA public
 key, local policy, and `ski-authorize`; see [`TARGET-HOST.md`](TARGET-HOST.md).
+
+The practical failure boundaries are deliberate: without agent forwarding the
+issuer cannot inject a credential; failed password or TOTP authentication
+creates no new identity; and a user or group change affects new issuance but
+does not retroactively rewrite an already issued certificate. A target host
+which has not been configured with the CA and a permitting local group policy
+must reject the certificate without contacting the issuer.
 
 ## Lifecycle controls
 
