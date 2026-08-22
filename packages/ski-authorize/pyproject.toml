@@ -1,28 +1,17 @@
 [project]
-name = "ski"
+name = "ski-authorize"
 version = "0.1.0"
-description = "SSH certificate issuer and ssh-agent integration service"
+description = "Offline OpenSSH certificate principal authorization helper"
 readme = "README.md"
-authors = [
-    { name = "Kristian Koehntopp", email = "kris-git@koehntopp.de" }
-]
 requires-python = ">=3.12"
-dependencies = [
-    "argon2-cffi>=25.1.0",
-    "asyncssh>=2.21.1",
-    "pyotp>=2.10.0",
-    "python-dotenv>=1.1.0",
-]
+dependencies = []
 
 [project.scripts]
-ski = "ski.cli:main"
+ski-authorize = "ski_authorize.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.9.27,<0.10.0"]
 build-backend = "uv_build"
-
-[tool.uv.workspace]
-members = ["packages/ski-authorize"]
 
 [dependency-groups]
 dev = [
@@ -44,9 +33,4 @@ select = ["E", "F", "I", "UP"]
 
 [tool.ty.environment]
 python-version = "3.12"
-root = [
-    "./src",
-    "./tests",
-    "./packages/ski-authorize/src",
-    "./packages/ski-authorize/tests",
-]
+root = ["./src", "./tests"]

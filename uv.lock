@@ -6,6 +6,12 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 
+[manifest]
+members = [
+    "ski",
+    "ski-authorize",
+]
+
 [[package]]
 name = "argon2-cffi"
 version = "25.1.0"
@@ -347,6 +353,27 @@ requires-dist = [
     { name = "pyotp", specifier = ">=2.10.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
 ]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3.5" },
+    { name = "ruff", specifier = ">=0.11.0" },
+    { name = "ty", specifier = ">=0.0.1a14" },
+]
+
+[[package]]
+name = "ski-authorize"
+version = "0.1.0"
+source = { editable = "packages/ski-authorize" }
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
 
 [package.metadata.requires-dev]
 dev = [
