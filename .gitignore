@@ -36,3 +36,6 @@ dist/
 *.cert
 known_hosts
 ssh-agent.sock
+
+# Our test CA persistence
+etc/

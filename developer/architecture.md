@@ -692,17 +692,27 @@ service-account, or root-access design. Such work must preserve the existing
 issuance and offline-host authorization contracts and must not broaden ordinary
 certificate access by default.
 
-### Epic 8 — Operational assurance and security regression suite
+### Epic 8 — Documentation and installer handoff
 
-**Goal.** Make the service supportable and preserve the access-control
-invariants established by the earlier epics.
+**Goal.** Complete the proof of concept with an accurate documentation handoff
+for the issuer operator, target-host operator, end user, and installing
+organization.
 
-**Includes.** Backup/restore drills for CA files, SQLite, and KRL; CA-log and
-KRL verification; journald field conventions; metrics/alerts; NTP health;
-incident and break-glass procedures; real OpenSSH and agent integration tests;
-negative and malformed-input tests; and regression coverage for fail-closed
-behaviour.
+**Includes.** Documentation in `docs/` for issuer installation and operation,
+the SQLite demo's backup and recovery boundaries, CA and KRL lifecycle commands
+implemented by Epic 6, target-host deployment and offline authorization, and
+the end-user certificate-and-agent experience. It must state which work is
+intentionally owned by the installing organization: production identity
+integration, configuration management, monitoring and alerting, SELinux
+packaging or local policy, incident procedures, and any production assurance
+drills.
 
-**Exit boundary.** The project has documented operational recovery and evidence
-that invalid input, unavailable local state, incorrect policy, expired
-certificates, and optional-KRL absence do not accidentally grant access.
+**Explicitly excludes.** New runtime features, identity-provider integrations,
+metrics or alerting code, automated backup/restore or incident infrastructure,
+new OpenSSH/agent integration tests, new security regression suites, and any
+host mutation or configuration-management client.
+
+**Exit boundary.** The `docs/` directory accurately describes the implemented
+proof of concept and its operational boundaries, so an adopting organization
+can decide and document its own production controls without mistaking them for
+features supplied by `ski`.
