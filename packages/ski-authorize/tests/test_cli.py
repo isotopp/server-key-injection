@@ -23,6 +23,8 @@ def test_host_command_parser_exposes_version_metadata() -> None:
     assert parser.prog == "ski-authorize"
     assert parser.description is not None
     assert "local host" in parser.description
+    assert parser.epilog is not None
+    assert "%F %u %t %k" in parser.epilog
 
 
 def test_host_command_parser_accepts_the_sshd_argument_shape() -> None:

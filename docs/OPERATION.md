@@ -3,9 +3,14 @@
 The current implementation is a demo issuer. It runs as one foreground
 `ski serve` process under systemd, stores its state in SQLite, and creates
 short-lived ordinary certificates with the persistent Ed25519 CA configured in
-`/home/ski/etc/env`. Production-host trust, offline authorization, revocation, and
-CA rotation are documented architecture targets but are not complete in this
-demo.
+`/home/ski/etc/env`. The independently installed production-host helper and
+its offline OpenSSH configuration are documented in
+[`TARGET-HOST.md`](TARGET-HOST.md); revocation and CA rotation remain later
+work.
+
+For target-host installation, CA public-key hand-off, policy review, and the
+OpenSSH reload procedure, use [`TARGET-HOST.md`](TARGET-HOST.md). The issuer
+does not install or remotely configure production hosts.
 
 ## Daily operator checks
 

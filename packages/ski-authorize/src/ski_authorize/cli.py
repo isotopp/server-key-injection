@@ -17,6 +17,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ski-authorize",
         description="Authorize OpenSSH certificate principals on a local host.",
+        epilog=(
+            "sshd supplies the authorization arguments as: --ca-fingerprint %F %u %t %k"
+        ),
     )
     parser.add_argument(
         "--version",
