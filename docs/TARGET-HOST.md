@@ -132,6 +132,21 @@ On Debian or Ubuntu, use the distro service name:
 sudo systemctl reload ssh
 ```
 
+## Installer-owned host controls
+
+This repository does not enroll hosts or provide configuration management. The
+installing organization owns the host's account lifecycle, firewall and route
+policy, package provenance, file labelling, monitoring, alerting, log
+retention, incident response, and production assurance. Those controls must
+preserve the local/offline authorization boundary described here.
+
+After Epic 6 is implemented, configuration management may atomically deploy
+the issuer's materialized KRL and enable it with a reviewed `RevokedKeys`
+directive. A host which does not receive or enable that file continues to rely
+on certificate expiry and its local policy. Neither mode contacts the issuer at
+login. Until Epic 6 delivers the KRL commands, do not invent a KRL deployment
+procedure or edit the placeholder file by hand.
+
 Do not enable the fragment until the CA fingerprint, policy groups, file
 ownership, and existing local Unix accounts have been reviewed. The helper
 does not create accounts or map one Unix account to another. A certificate's
@@ -154,6 +169,14 @@ denials using the host's normal audit tooling rather than weakening the policy:
 getenforce
 sudo ausearch -m AVC -ts recent
 ```
+
+If the audit log reports `ski-authorize` in `sshd_session_t` being denied
+execution of `ldconfig`, treat that as a packaging/runtime hardening finding:
+the helper may still complete because native-library discovery has a fallback,
+but the host should not grant the SSH session domain a broad permission to run
+`ldconfig`. Do not use `audit2allow` or disable SELinux as a workaround; the
+installer must resolve the runtime dependency and local labelling through its
+own reviewed host controls.
 
 ## Rocky Linux 9.x UTM smoke checklist (Epic 5, manual)
 
