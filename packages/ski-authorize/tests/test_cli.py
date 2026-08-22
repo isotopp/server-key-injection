@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -64,3 +66,32 @@ def test_issuer_options_are_not_part_of_the_host_command() -> None:
     """Issuer state and network options are rejected by argparse."""
     with pytest.raises(SystemExit, match="2"):
         build_parser().parse_args(["--database", "issuer.sqlite3"])
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="production policy files are root-owned")
+def test_check_config_reports_a_valid_root_owned_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The operator check command validates without producing a principal."""
+    policy_path = tmp_path / "authorization.toml"
+    policy_path.write_text(
+        """
+[ssh]
+trusted_ca_fingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+allowed_groups = []
+allow_self_login_only = true
+""".lstrip()
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["ski-authorize", "--check-config", "--config", str(policy_path)],
+    )
+
+    from ski_authorize.cli import main
+
+    main()
+
+    assert capsys.readouterr().out == "authorization policy is valid\n"

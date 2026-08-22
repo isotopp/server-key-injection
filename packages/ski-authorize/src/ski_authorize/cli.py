@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
+from pathlib import Path
 
 from . import __version__
+from .policy import PolicyError, load_policy
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,11 +30,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     """Run the host-package command."""
-    args = build_parser().parse_args()
+    args = build_parser().parse_args(argv)
     if args.check_config:
-        raise SystemExit("ski-authorize: configuration checking is not implemented")
+        if (
+            args.config is None
+            or args.ca_fingerprint is not None
+            or args.target_user is not None
+            or args.certificate_type is not None
+            or args.certificate_base64 is not None
+        ):
+            raise SystemExit("ski-authorize: --check-config requires only --config")
+        try:
+            load_policy(Path(args.config))
+        except PolicyError as exc:
+            raise SystemExit("ski-authorize: authorization policy is invalid") from exc
+        print("authorization policy is valid")
+        return
     if any(
         value is not None
         for value in (
