@@ -1,5 +1,8 @@
 # Installing `ski-authorize` on a production SSH host
 
+See [`README.md`](README.md) for the documentation map and
+[`OPERATION.md`](OPERATION.md) for the issuer-side user workflow.
+
 This guide describes the deliberate, offline trust hand-off from an issuer to
 an OpenSSH target host. The host runs only the independently installable
 `ski-authorize` helper. It does not contact `ssh.example.com`, read the

@@ -1,5 +1,10 @@
 # Operating `ski`
 
+This guide is for issuer operators and end users. Start with
+[`README.md`](README.md) for the documentation map; use
+[`TARGET-HOST.md`](TARGET-HOST.md) for the separately installed production
+host.
+
 The current implementation is a demo issuer. It runs as one foreground
 `ski serve` process under systemd, stores its state in SQLite, and creates
 short-lived ordinary certificates with the persistent Ed25519 CA configured in
@@ -121,9 +126,9 @@ agent.
 
 Forwarding the agent to an untrusted host is unsafe. Without `-A`, the issuer
 must reject the request with `Agent forwarding is required.` If authentication
-fails, no new credential should appear in the agent. The current demo's
-certificates are not accepted by production hosts until the later host-trust
-and authorization epics are implemented.
+fails, no new credential should appear in the agent. Production hosts accept
+these certificates only when separately configured with the trusted CA public
+key, local policy, and `ski-authorize`; see [`TARGET-HOST.md`](TARGET-HOST.md).
 
 ## Lifecycle controls
 

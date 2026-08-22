@@ -1,5 +1,9 @@
 # Installing and initializing `ski`
 
+This guide is for the issuer installation account. For daily operation, see
+[`OPERATION.md`](OPERATION.md); for production-host installation, see
+[`TARGET-HOST.md`](TARGET-HOST.md).
+
 This is the installation guide for the current demo issuer. It creates a
 single systemd-managed service, a persistent Ed25519 user CA, one demo user,
 and one group membership. The demo stores password verifiers, TOTP secrets,
@@ -113,9 +117,9 @@ sudo -u ski -H /home/ski/.local/bin/ski group show platform-ops
 ```
 
 The group is represented in an issued certificate as the signed principal
-`group:platform-ops`. A later production-host authorization helper will decide
-whether that principal is allowed on a particular host; the current demo does
-not yet make production hosts trust the CA.
+`group:platform-ops`. A separately installed production host uses the
+`ski-authorize` helper and its local policy to decide whether that principal is
+allowed; this issuer installation does not remotely configure the host.
 
 ## Install and start systemd
 

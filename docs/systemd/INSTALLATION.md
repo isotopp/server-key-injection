@@ -1,5 +1,8 @@
 # Installing `ski` under systemd
 
+See [`../README.md`](../README.md) for the documentation map and
+[`../OPERATION.md`](../OPERATION.md) for routine issuer operation.
+
 The unit in [`ski.service`](ski.service) is a reviewed template. Adapt the
 executable, account, and filesystem paths to the host before installing it. It
 does not create a socket unit: `ski` owns its IPv4 and IPv6 listening sockets.
