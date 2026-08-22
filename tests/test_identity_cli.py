@@ -144,6 +144,20 @@ def test_user_show_not_found_keeps_safe_exit_and_empty_output(
     assert output.getvalue() == ""
 
 
+def test_identity_command_reports_configuration_failures_without_a_traceback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A malformed identity-store location stays an actionable CLI failure."""
+    monkeypatch.setenv("SKI_CA_DATABASE", str(tmp_path / "missing" / "state.sqlite3"))
+
+    with pytest.raises(
+        SystemExit,
+        match="user command failed: SKI_CA_DATABASE parent directory is unavailable",
+    ):
+        main(["user", "list"], output=io.StringIO())
+
+
 def test_read_only_identity_workflows_release_database_on_success_and_failure(
     monkeypatch,
     tmp_path: Path,

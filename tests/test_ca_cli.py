@@ -197,7 +197,10 @@ def test_ca_init_refuses_existing_material_without_mutation(
     private_path.write_bytes(b"pre-existing-private-material")
     output = io.StringIO()
 
-    with pytest.raises(SystemExit, match="CA initialization failed"):
+    with pytest.raises(
+        SystemExit,
+        match="CA initialization failed: CA output already exists",
+    ):
         main(
             ["ca", "init"],
             notifier=ServiceReloadNotifier(_StoppedServiceManager()),
@@ -210,6 +213,34 @@ def test_ca_init_refuses_existing_material_without_mutation(
         assert database.get_active_ca() is None
     finally:
         database.close()
+
+
+@pytest.mark.parametrize(
+    ("command", "summary"),
+    (
+        (("ca", "show"), "unable to show CA"),
+        (("ca", "public-key"), "unable to read CA public key"),
+        (("ca", "log", "list"), "unable to list CA log"),
+        (("ca", "log", "verify"), "CA state verification failed"),
+    ),
+)
+def test_ca_read_commands_include_safe_configuration_failure_reason(
+    monkeypatch,
+    tmp_path: Path,
+    command: tuple[str, ...],
+    summary: str,
+) -> None:
+    """CA read/verify errors identify a safe, actionable configuration cause."""
+    environment = _ca_environment(tmp_path)
+    environment["SKI_CA_DATABASE"] = str(tmp_path / "missing" / "state.sqlite3")
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(
+        SystemExit,
+        match=f"{summary}: SKI_CA_DATABASE parent directory is unavailable",
+    ):
+        main(command, output=io.StringIO())
 
 
 def test_ca_show_and_public_key_are_redacted_read_only_views(

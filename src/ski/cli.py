@@ -178,6 +178,11 @@ def _new_totp_secret() -> str:
     return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
 
 
+def _command_failure(summary: str, error: Exception) -> SystemExit:
+    """Return a safe, actionable CLI failure from a domain exception."""
+    return SystemExit(f"ski: {summary}: {error}")
+
+
 def _run_ca_init(
     *,
     notifier: ServiceReloadNotifier,
@@ -199,7 +204,7 @@ def _run_ca_init(
                 "ski: CA initialized; service notification failed; retry notification",
             )
     except (CAFileError, ConfigurationError, StateError) as exc:
-        raise SystemExit("ski: CA initialization failed") from exc
+        raise _command_failure("CA initialization failed", exc) from exc
 
 
 def _run_ca_show(*, show_all: bool, output: TextIO) -> None:
@@ -215,7 +220,7 @@ def _run_ca_show(*, show_all: bool, output: TextIO) -> None:
             print(f"Status: {ca.status}", file=output)
             print(f"Activated: {ca.activated_at}", file=output)
     except (ConfigurationError, StateError) as exc:
-        raise SystemExit("ski: unable to show CA") from exc
+        raise _command_failure("unable to show CA", exc) from exc
 
 
 def _run_ca_public_key(*, fingerprint: str | None, output: TextIO) -> None:
@@ -226,7 +231,7 @@ def _run_ca_public_key(*, fingerprint: str | None, output: TextIO) -> None:
             raise SystemExit("ski: requested CA is unavailable")
         print(public_key, file=output)
     except (ConfigurationError, StateError, UnicodeError) as exc:
-        raise SystemExit("ski: unable to read CA public key") from exc
+        raise _command_failure("unable to read CA public key", exc) from exc
 
 
 def _run_ca_log_list(
@@ -250,7 +255,7 @@ def _run_ca_log_list(
         for line in events:
             print(line, file=output)
     except (ConfigurationError, StateError, ValueError) as exc:
-        raise SystemExit("ski: unable to list CA log") from exc
+        raise _command_failure("unable to list CA log", exc) from exc
 
 
 def _run_ca_log_verify(*, output: TextIO) -> None:
@@ -259,7 +264,7 @@ def _run_ca_log_verify(*, output: TextIO) -> None:
         verify_ca_state()
         print("CA state verified.", file=output)
     except (ConfigurationError, StateError) as exc:
-        raise SystemExit("ski: CA state verification failed") from exc
+        raise _command_failure("CA state verification failed", exc) from exc
 
 
 def _open_identity_store() -> tuple[StateDatabase, SqliteIdentityStore]:
@@ -765,5 +770,7 @@ def main(
             notifier=effective_notifier,
             output=effective_output,
         )
+    except (CAFileError, ConfigurationError, IdentityStoreError, StateError) as exc:
+        raise _command_failure(f"{args.command} command failed", exc) from exc
     except KeyboardInterrupt:
         return
