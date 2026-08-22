@@ -457,19 +457,23 @@ must never receive the CA private key. A representative `sshd_config` is:
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-TrustedUserCAKeys /etc/ssh/ski/user-ca.pub
+TrustedUserCAKeys /opt/ski-authorize/config/user-ca.pub
 CASignatureAlgorithms ssh-ed25519
-AuthorizedPrincipalsCommand /usr/local/libexec/ski-authorize --config /etc/ssh/ski/authorization.toml %u %k
+AuthorizedPrincipalsCommand /opt/ski-authorize/bin/ski-authorize --config /opt/ski-authorize/config/authorization.toml --ca-fingerprint %F %u %t %k
 AuthorizedPrincipalsCommandUser ski-authz
 # Optional early revocation: enable only if configuration management deploys it.
-# RevokedKeys /etc/ssh/ski/revoked.krl
+# RevokedKeys /opt/ski-authorize/config/revoked.krl
 ```
 
 The exact `CASignatureAlgorithms` list must match the selected CA algorithm and
-the OpenSSH versions in use. The helper executable and
-`/etc/ssh/ski/authorization.toml` must be root-owned and non-writable by
-ordinary users; the dedicated command user needs only the ability to read the
-public configuration. It has no issuer credential or issuer-network dependency.
+the OpenSSH versions in use. This project requires OpenSSH 9 or later on target
+hosts. Epic 5 verifies the complete configuration on a current Rocky Linux 9.x
+UTM guest; its documentation covers Debian and Ubuntu installation but does not
+claim those distributions as tested in that epic. The helper executable and
+`/opt/ski-authorize/config/authorization.toml` must be root-owned and
+non-writable by ordinary users; the dedicated command user needs only the
+ability to read the public configuration. It has no issuer credential or
+issuer-network dependency.
 Disable agent, TCP, X11, and port forwarding by default on production hosts and
 allow them only in narrowly justified `Match` blocks.
 
@@ -482,30 +486,39 @@ mode contacts the issuer during login.
 OpenSSH first verifies that the presented object is a user certificate, that it
 is time-valid, that it is signed by the configured CA public key, and that its
 certificate semantics are valid. It then invokes `ski-authorize` with `%u` (the
-requested local account) and `%k` (the certificate/public-key data). The helper
-must return no principal and a non-zero exit status on every error or denial.
-It returns only a principal which is actually present in the certificate when
-access is allowed. This makes OpenSSH enforce the intersection instead of
-treating either a certificate claim or server policy alone as sufficient.
+requested local account), `%t` (the key/certificate type), `%k` (the
+base64-encoded certificate), and `%F` (the offering certificate's CA
+fingerprint). The helper reconstructs the public-key form from `%t` and `%k`
+before parsing it, and requires `%F` to equal the local policy's explicit CA
+fingerprint. The helper must return no principal and a non-zero exit status on
+every error or denial. It returns only a principal which is actually present in
+the certificate when access is allowed. This makes OpenSSH enforce the
+intersection instead of treating either a certificate claim or server policy
+alone as sufficient.
 
 ### Offline host group policy
 
 Each host has an authorization policy at
-`/etc/ssh/ski/authorization.toml`, deployed through configuration management.
+`/opt/ski-authorize/config/authorization.toml`, deployed through configuration
+management. The host package includes a small sample policy and matching
+OpenSSH drop-in fragment; their final deployed files are root-owned and must be
+reviewed for the site before activation.
 The policy is local to that host, so its allowed groups are independent of
 other production hosts. For example:
 
 ```toml
 [ssh]
+trusted_ca_fingerprint = "SHA256:..."
 allowed_groups = ["group:platform-ops", "group:database-oncall"]
 allow_self_login_only = true
 ```
 
 `ski-authorize` performs the following checks in order:
 
-1. Parse `%k` as an SSH user certificate; reject malformed input, a non-user
-   certificate, an unexpected CA/fingerprint, expired/not-yet-valid validity,
-   missing `key_id`, or invalid principal grammar.
+1. Reconstruct `%t` plus `%k` as an SSH user certificate and require `%F` to
+   equal the policy `trusted_ca_fingerprint`; reject malformed input, a
+   non-user certificate, an unexpected CA/fingerprint, expired/not-yet-valid
+   validity, missing `key_id`, or invalid principal grammar.
 2. Bind the target account `%u` to the certificate identity. For normal access,
    require self-login (`%u == key_id`) or use an explicit, separately reviewed
    account-switch policy for service/root accounts.
@@ -635,15 +648,17 @@ certificate or implement early revocation/KRL materialization.
 certificate only when its local policy permits it.
 
 **Includes.** Distribution of a CA public key, the documented `sshd_config`,
-`/etc/ssh/ski/authorization.toml`, the offline `ski-authorize` helper, account
-binding, principal grammar validation, and intersection of signed group claims
-with local `allowed_groups`.
+`/opt/ski-authorize/config/authorization.toml`, the offline `ski-authorize`
+helper, account binding, principal grammar validation, and intersection of
+signed group claims with local `allowed_groups`.
 
-**Exit boundary.** Integration tests prove that a host neither contacts nor
-needs the issuer or identity store at login. They cover accepts and denials for
-signature, expiry, account binding, malformed certificates, missing group
-claims, and disallowed groups. KRL use, external identity providers, and
-privileged account switching remain out of scope.
+**Exit boundary.** Helper/unit tests and a manual smoke test on a current Rocky
+Linux 9.x UTM host prove that a host neither contacts nor needs the issuer or
+identity store at login. They cover accepts and denials for signature, expiry,
+account binding, malformed certificates, missing group claims, and disallowed
+groups. KRL use, external identity providers, and privileged account switching
+remain out of scope. The next security review follows Epic 6 rather than Epic
+5.
 
 ### Epic 6 — Revocation, KRL, and CA rotation
 
