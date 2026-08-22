@@ -108,3 +108,8 @@ sudo journalctl -u ski.service -o verbose
 The daemon handles `SIGHUP` as an atomic configuration reload and `SIGTERM` as
 bounded graceful shutdown. There is intentionally no `ski stop`, `ski reload`,
 or `ski status` command; systemd owns those lifecycle operations.
+
+The unit and journald integration do not provide monitoring, alerting, log
+retention, backup scheduling, restore testing, incident response, or SELinux
+policy. Configure those controls through the installing organization's normal
+platform tooling and keep their paths and credentials outside the unit.

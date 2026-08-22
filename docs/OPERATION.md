@@ -83,10 +83,36 @@ or credential material.
   `service_ready` event. A failed reload retains the previous working runtime
   configuration.
 
+## Backup and recovery boundary
+
+The protected recovery set is the SQLite database, its lock and journal files
+when present, the CA private and public key files, and the materialized KRL
+file. Treat the database as sensitive demo identity data: it contains password
+verifiers, TOTP secrets, group membership, and issuance history. Use the
+installing organization's encrypted backup system; `ski` does not upload,
+rotate, retain, or restore backups for you.
+
+For a planned recovery, stop the service before taking or restoring a backup:
+
+1. Stop `ski.service` and confirm it is inactive.
+2. Snapshot or restore the complete protected recovery set as one unit,
+   preserving the `ski` owner, restrictive modes, and non-symlink file
+   contract. Do not restore a database with a different CA key set.
+3. Run `ski ca show`, `ski ca public-key`, and `ski ca log verify` as the
+   service account before starting the service. Do not edit SQLite to simulate
+   revocation or repair a failed integrity check.
+4. Start the service, confirm `SKI_EVENT=service_ready` in journald, and
+   perform one non-secret operational check before returning it to use.
+
 The current demo has no implemented `ski ca revoke`, `ski ca reconcile`, or CA
-rotation command. Do not simulate revocation by editing SQLite or deleting CA
-files. Preserve the database and CA files together until the later revocation
-and rotation work is deployed.
+rotation command. Do not present those as runnable recovery steps until Epic 6
+delivers them. Preserve the database and CA files together until the later
+revocation and rotation work is deployed.
+
+Monitoring, alerting, journal retention, incident response, break-glass
+access, backup scheduling, restore testing, and SELinux policy are deployment
+responsibilities of the installing organization. They are not hidden features
+of the issuer or host helper.
 
 ## End-user experience
 
