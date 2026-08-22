@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from . import __version__
+from .authorization import AuthorizationDenied, authorize_certificate
+from .certificate import CertificateError, parse_certificate
 from .policy import PolicyError, load_policy
 
 
@@ -48,14 +50,30 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise SystemExit("ski-authorize: authorization policy is invalid") from exc
         print("authorization policy is valid")
         return
-    if any(
-        value is not None
-        for value in (
-            args.config,
-            args.ca_fingerprint,
-            args.target_user,
-            args.certificate_type,
-            args.certificate_base64,
-        )
+
+    positional = (
+        args.target_user,
+        args.certificate_type,
+        args.certificate_base64,
+    )
+    if any(value is not None for value in positional) and not all(
+        value is not None for value in positional
     ):
-        raise SystemExit("ski-authorize: authorization is not implemented")
+        raise SystemExit("ski-authorize: incomplete authorization arguments")
+    if not all(value is not None for value in positional):
+        raise SystemExit("ski-authorize: authorization arguments are required")
+    if args.config is None or args.ca_fingerprint is None:
+        raise SystemExit("ski-authorize: --config and --ca-fingerprint are required")
+
+    try:
+        policy = load_policy(Path(args.config))
+        certificate = parse_certificate(args.certificate_type, args.certificate_base64)
+        principal = authorize_certificate(
+            policy,
+            certificate,
+            supplied_ca_fingerprint=args.ca_fingerprint,
+            target_user=args.target_user,
+        )
+    except (AuthorizationDenied, CertificateError, PolicyError) as exc:
+        raise SystemExit("ski-authorize: authorization denied") from exc
+    print(principal)
