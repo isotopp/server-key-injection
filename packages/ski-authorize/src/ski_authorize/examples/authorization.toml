@@ -1,0 +1,8 @@
+# Copy this file to /opt/ski-authorize/config/authorization.toml as root.
+# Replace the fingerprint placeholder after comparing `ski ca show` with
+# `ski ca public-key`. Keep the empty group list until host access is reviewed.
+
+[ssh]
+trusted_ca_fingerprint = "REPLACE_WITH_SKI_CA_FINGERPRINT"
+allowed_groups = []
+allow_self_login_only = true
